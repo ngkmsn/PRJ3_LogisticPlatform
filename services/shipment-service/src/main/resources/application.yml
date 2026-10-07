@@ -1,6 +1,37 @@
 spring:
   application:
     name: shipment-service
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:shipment_db}}
+    username: ${DB_USERNAME:shipment_service_user}
+    password: ${DB_PASSWORD:shipment_password}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      connection-timeout: 20000
+      maximum-pool-size: 10
+      minimum-idle: 2
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+  liquibase:
+    change-log: classpath:db/changelog/db.changelog-master.yaml
+    enabled: true
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      group-id: ${KAFKA_CONSUMER_GROUP_ID:${spring.application.name}-group}
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        spring.json.trusted.packages: "com.logistics.*"
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
 
 server:
   port: ${SHIPMENT_SERVICE_PORT:8083}
@@ -9,13 +40,20 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        include: health,info,liquibase
   endpoint:
     health:
       show-details: always
+      probes:
+        enabled: true
+  health:
+    db:
+      enabled: true
+    kafka:
+      enabled: true
 
 info:
   app:
     name: ${spring.application.name}
     version: "@project.version@"
-    description: "Tracks shipments, vehicles, routes, and real-time location updates"
+    description: "Coordinates deliveries, routing, and carrier tracking"

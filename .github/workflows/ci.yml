@@ -1,0 +1,49 @@
+name: CI - Build & Test
+
+'on':
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Build & Test (Java 21)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 21 LTS
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Verify build environment
+        run: |
+          java -version
+          mvn -version
+
+      - name: Build and test all modules (Multi-module Monorepo)
+        run: mvn -B clean verify --file pom.xml
+
+      - name: Publish Test Summary
+        if: always()
+        run: |
+          echo "### 🚀 CI Build & Test Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit**: \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Branch / Ref**: \`${{ github.ref }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Trigger**: \`${{ github.event_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Java Version**: Temurin JDK 21 LTS" >> $GITHUB_STEP_SUMMARY
+          echo "- **Scope**: Full monorepo reactor build & automated tests" >> $GITHUB_STEP_SUMMARY

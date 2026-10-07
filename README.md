@@ -1,7 +1,7 @@
 # Logistics Platform
 
 A cloud-native **logistics management system** built on a microservice architecture.  
-This repository is a Maven multi-module monorepo containing all platform services, shared libraries, and local infrastructure setup.
+This repository is a Maven multi-module monorepo containing all platform services, shared libraries, local infrastructure orchestration, isolated persistence layers, event-driven messaging, and in-memory caching.
 
 ---
 
@@ -9,15 +9,18 @@ This repository is a Maven multi-module monorepo containing all platform service
 
 1. [Architecture Overview](#architecture-overview)  
 2. [Service Decomposition](#service-decomposition)  
-3. [Infrastructure Stack (Docker Compose)](#infrastructure-stack-docker-compose)  
-4. [Repository Structure](#repository-structure)  
-5. [Prerequisites](#prerequisites)  
-6. [Build & Run](#build--run)  
-7. [API Gateway](#api-gateway)  
-8. [Testing](#testing)  
-9. [Configuration](#configuration)  
-10. [Architecture Decisions (ADRs)](#architecture-decisions-adrs)  
-11. [Roadmap](#roadmap)
+3. [Database-per-Service Architecture (PostgreSQL)](#database-per-service-architecture-postgresql)  
+4. [Event-Driven Architecture (Apache Kafka)](#event-driven-architecture-apache-kafka)  
+5. [In-Memory Store & Caching (Redis)](#in-memory-store--caching-redis)  
+6. [Infrastructure Stack (Docker Compose)](#infrastructure-stack-docker-compose)  
+7. [Repository Structure](#repository-structure)  
+8. [Prerequisites](#prerequisites)  
+9. [Build & Run](#build--run)  
+10. [API Gateway](#api-gateway)  
+11. [Testing](#testing)  
+12. [Configuration](#configuration)  
+13. [Architecture Decisions (ADRs)](#architecture-decisions-adrs)  
+14. [Roadmap](#roadmap)
 
 ---
 
@@ -44,19 +47,36 @@ This repository is a Maven multi-module monorepo containing all platform service
            └────┬─────┘ └────┬─────┘ └──────┬───────┘ └────────┬─────────┘
                 │            │              │                  │
 ════════════════╪════════════╪══════════════╪══════════════════╪═════════════════════════
-   INFRASTRUCTURE LAYER (Docker Compose — PB-003 ✅)
+   PERSISTENCE LAYER — Database-per-Service Isolation (PostgreSQL 16 — PB-004 ✅)
                 │            │              │                  │
-  ┌─────────────▼────────────▼──────────────▼──────────────────▼─────────────┐
-  │                           PostgreSQL 16                                  │
-  │     (user_db        order_db         shipment_db        notification_db) │
-  └──────────────────────────────────────────────────────────────────────────┘
+                ▼            ▼              ▼                  ▼
+           ┌──────────┐ ┌──────────┐ ┌──────────────┐ ┌──────────────────┐
+           │ user_db  │ │ order_db │ │ shipment_db  │ │ notification_db  │
+           │ (user_   │ │ (order_  │ │ (shipment_   │ │ (notification_   │
+           │  user)   │ │  user)   │ │  user)       │ │  user)           │
+           └──────────┘ └──────────┘ └──────────────┘ └──────────────────┘
+            [NO CROSS-DATABASE ACCESS ALLOWED — ENFORCED AT DB ROLE LEVEL]
+═════════════════════════════════════════════════════════════════════════════════════════
+   ASYNC EVENT BUS — Apache Kafka 3.8 KRaft (PB-005 ✅)
+                │            │              │                  │
+                └────────────┴──────────────┴──────────────────┘
+                 ▲ (publish events)           │ (consume events)
+                 │                            ▼
   ┌──────────────────────────────────────────────────────────────────────────┐
   │                 Apache Kafka 3.8 (KRaft Mode :9092)                      │
+  │  Topics:                                                                 │
+  │    • logistics.order.events        • logistics.shipment.events           │
+  │    • logistics.notification.events • logistics.user.events               │
   │                   + Kafka UI Dashboard (:8090)                           │
   └──────────────────────────────────────────────────────────────────────────┘
+═════════════════════════════════════════════════════════════════════════════════════════
+   IN-MEMORY STORE & CACHE — Redis 7 (PB-006 ✅)
   ┌──────────────────────────────────────────────────────────────────────────┐
-  │                 Redis 7 (Cache & Rate Limiting :6379)                    │
+  │                 Redis 7 (Standalone, AOF Enabled :6379)                  │
+  │  Used for session tokens, distributed caching, and rate limiting        │
   └──────────────────────────────────────────────────────────────────────────┘
+═════════════════════════════════════════════════════════════════════════════════════════
+   INFRASTRUCTURE LAYER (Docker Compose — PB-003 ✅)
   ┌──────────────────────────────────────────────────────────────────────────┐
   │                 Mailpit (SMTP :1025 | Web UI :8025)                      │
   └──────────────────────────────────────────────────────────────────────────┘
@@ -64,20 +84,110 @@ This repository is a Maven multi-module monorepo containing all platform service
 
 **External clients talk ONLY to the API Gateway (port 8080). Backend services are internal.**
 
-Each service is **independently deployable**, has its own isolated database schema (Database-per-Service pattern), and communicates over HTTP (synchronous) or Apache Kafka (asynchronous events).
+Each service is **independently deployable**, has its own isolated database schema (Database-per-Service pattern), communicates asynchronously via Apache Kafka, and utilizes Redis for high-speed in-memory state.
 
 ---
 
 ## Service Decomposition
 
-| Service | Port | Purpose |
-|---|---|---|
-| **`api-gateway`** | **8080** | **Single entry point for all external clients. Routes requests to backend services by path prefix.** |
-| `user-service` | 8081 | User accounts, roles (`admin / dispatcher / driver / customer`), authentication identity |
-| `order-service` | 8082 | Order lifecycle: create → assign → in-transit → delivered / cancelled |
-| `shipment-service` | 8083 | Physical shipment runs: vehicle & driver assignment, real-time location, proof-of-delivery |
-| `notification-service` | 8084 | Outbound notifications (email, SMS, push) triggered by platform events |
-| `common-lib` | – | Shared library: `ApiResponse<T>`, `LogisticsPlatformException`, `CommonUtils` |
+| Service | Port | Purpose | Database | Messaging | In-Memory Cache |
+|---|---|---|---|---|---|
+| **`api-gateway`** | **8080** | **Single entry point for all external clients. Routes requests to backend services by path prefix.** | – *(Stateless)* | – | Optional Rate Limiting |
+| `user-service` | 8081 | User accounts, roles (`admin / dispatcher / driver / customer`), authentication identity | `user_db` (`user_service_user`) | Producer (`logistics.user.events`) | Session & Token Cache (`Redis 7`) |
+| `order-service` | 8082 | Order lifecycle: create → assign → in-transit → delivered / cancelled | `order_db` (`order_service_user`) | Producer (`logistics.order.events`) | – |
+| `shipment-service` | 8083 | Physical shipment runs: vehicle & driver assignment, real-time location, proof-of-delivery | `shipment_db` (`shipment_service_user`) | Producer / Consumer (`logistics.shipment.events`) | – |
+| `notification-service` | 8084 | Outbound notifications (email, SMS, push) triggered by platform events | `notification_db` (`notification_service_user`) | Consumer (`logistics.*.events`) | – |
+| `common-lib` | – | Shared library: `ApiResponse<T>`, `LogisticsPlatformException`, `DomainEvent<T>`, `KafkaTopics`, `CommonUtils` | – | Shared envelopes | – |
+
+---
+
+## Database-per-Service Architecture (PostgreSQL)
+
+To preserve loose coupling and strict bounded contexts, the persistence layer implements the **Database-per-Service** pattern with physical and logical role isolation.
+
+### Service Credentials & Access Isolation
+
+| Service | Database Name | Dedicated Role | Default Password | Default JDBC URL |
+|---|---|---|---|---|
+| `user-service` | `user_db` | `user_service_user` | `user_password` | `jdbc:postgresql://localhost:5432/user_db` |
+| `order-service` | `order_db` | `order_service_user` | `order_password` | `jdbc:postgresql://localhost:5432/order_db` |
+| `shipment-service` | `shipment_db` | `shipment_service_user` | `shipment_password` | `jdbc:postgresql://localhost:5432/shipment_db` |
+| `notification-service` | `notification_db` | `notification_service_user` | `notification_password` | `jdbc:postgresql://localhost:5432/notification_db` |
+
+### Strict Cross-Service Access Control
+- `REVOKE CONNECT ON DATABASE <db> FROM PUBLIC` is executed on all databases.
+- Only the owning role is granted `CONNECT` privilege on its database.
+- Attempting cross-service access (e.g. `user_service_user` trying to connect to `order_db`) results in an immediate PostgreSQL rejection:
+  ```
+  FATAL: permission denied for database "order_db"
+  DETAIL: User does not have CONNECT privilege.
+  ```
+
+---
+
+## Event-Driven Architecture (Apache Kafka)
+
+Asynchronous inter-service communication and event broadcasting are managed via Apache Kafka 3.8 running in native **KRaft mode** (no ZooKeeper required).
+
+### Foundation Topic Structure
+
+All topic names follow the standard domain hierarchy convention defined in `KafkaTopics`:
+
+| Topic Name | Purpose | Producers | Consumers |
+|---|---|---|---|
+| `logistics.order.events` | Order status changes (`OrderCreated`, `OrderCancelled`, etc.) | `order-service` | `shipment-service`, `notification-service` |
+| `logistics.shipment.events` | Shipment tracking updates (`ShipmentDispatched`, `DeliveryCompleted`) | `shipment-service` | `order-service`, `notification-service` |
+| `logistics.notification.events` | Notification triggers and audit records | Domain services | `notification-service` |
+| `logistics.user.events` | User lifecycle events (`UserRegistered`, `DriverAssigned`) | `user-service` | `notification-service` |
+
+### Standard Domain Event Envelope
+
+All events share the universal `DomainEvent<T>` envelope defined in `common-lib`:
+```json
+{
+  "eventId": "c86a7d55-7fc7-458b-967b-12d8a39a7b93",
+  "eventType": "OrderCreated",
+  "aggregateId": "ORD-10023",
+  "timestamp": "2026-10-07T03:58:00Z",
+  "payload": { ... }
+}
+```
+
+---
+
+## In-Memory Store & Caching (Redis)
+
+Redis 7 is deployed as the foundational in-memory store for low-latency operations, temporary state, distributed session management, and upcoming rate-limiting capabilities.
+
+### Redis Configuration & Port
+- **Host Port**: `6379`
+- **Internal Port**: `6379`
+- **Volume**: `logistics_redis_data` (AOF persistence enabled: `redis-server --appendonly yes`)
+- **Container Name**: `logistics-redis`
+
+### Spring Boot Data Redis Integration
+- Microservices connect via Spring Data Redis (`Lettuce` driver).
+- Environment variables:
+  - `spring.data.redis.host: ${REDIS_HOST:localhost}`
+  - `spring.data.redis.port: ${REDIS_PORT:6379}`
+  - `spring.data.redis.password: ${REDIS_PASSWORD:}`
+- Actuator Health check enabled: `management.health.redis.enabled=true`.
+- Bean `RedisTemplate<String, Object>` is pre-configured with JSON serialization (`GenericJackson2JsonRedisSerializer`).
+
+### How to Inspect & Test Redis
+```bash
+# 1. Ping Redis container
+docker exec logistics-redis redis-cli ping
+# Output: PONG
+
+# 2. Test SET & GET via CLI
+docker exec logistics-redis redis-cli set sample_key "Hello Redis"
+docker exec logistics-redis redis-cli get sample_key
+# Output: Hello Redis
+
+# 3. Check Redis Health via Actuator
+curl http://localhost:8081/actuator/health | grep redis
+```
 
 ---
 
@@ -97,50 +207,22 @@ All foundational infrastructure required for local development is containerized 
 
 ### Infrastructure Management Commands
 
-#### 1. Start Infrastructure
-Start all infrastructure containers in detached mode:
 ```bash
+# Start all infrastructure
 docker compose up -d
-```
 
-#### 2. Check Service Status & Health
-```bash
+# Check status & health
 docker compose ps
-```
-All containers should display status `Up` or `Up (healthy)`.
 
-#### 3. View Logs
-View combined logs:
-```bash
-docker compose logs -f
-```
-Or view logs for a specific container:
-```bash
-docker compose logs -f postgres
-docker compose logs -f kafka
-docker compose logs -f redis
-```
+# View logs
+docker compose logs -f [service]
 
-#### 4. Stop Infrastructure
-Stop containers while preserving volume data:
-```bash
+# Stop infrastructure
 docker compose down
-```
 
-#### 5. Reset Infrastructure (Delete all data)
-Stop containers and completely remove all persistent volumes:
-```bash
+# Reset and delete all data
 docker compose down -v
 ```
-
-#### 6. Validate Compose Configuration
-```bash
-docker compose config
-```
-
-### Accessing Local UIs
-- **Kafka UI**: [http://localhost:8090](http://localhost:8090)
-- **Mailpit Web UI**: [http://localhost:8025](http://localhost:8025)
 
 ---
 
@@ -149,28 +231,31 @@ docker compose config
 ```
 logistics-platform/
 ├── pom.xml                               # Parent POM (multi-module build root)
-├── docker-compose.yml                    # ← PB-003: Infrastructure orchestration
+├── docker-compose.yml                    # Infrastructure orchestration (Postgres, Kafka KRaft, Redis, Mailpit)
 ├── .env.example                          # Environment variables template (no secrets)
 ├── .gitignore
 ├── README.md
 │
 ├── docker/
 │   └── postgres/
-│       └── init-databases.sql            # Auto-creates user_db, order_db, shipment_db, notification_db
+│       └── init-databases.sql            # Role & DB provisioning per service
 │
 ├── shared/
-│   └── common-lib/                       # Shared library (jar, no Spring Boot main)
+│   └── common-lib/                       # Shared library
 │       ├── pom.xml
 │       └── src/
 │           ├── main/java/com/logistics/common/
 │           │   ├── dto/ApiResponse.java
+│           │   ├── event/DomainEvent.java           # Universal event envelope
+│           │   ├── event/KafkaTopics.java           # Foundation topic constants
 │           │   ├── exception/LogisticsPlatformException.java
 │           │   └── util/CommonUtils.java
 │           └── test/java/com/logistics/common/
+│               ├── event/DomainEventTest.java
 │               └── util/CommonUtilsTest.java
 │
 └── services/
-    ├── api-gateway/                      # ← PB-002: API Gateway (Spring Cloud Gateway)
+    ├── api-gateway/                      # API Gateway (Spring Cloud Gateway)
     │   ├── pom.xml
     │   └── src/
     │       ├── main/java/com/logistics/gateway/ApiGatewayApplication.java
@@ -179,25 +264,51 @@ logistics-platform/
     │       ├── test/java/com/logistics/gateway/GatewayRoutesConfigTest.java
     │       └── test/resources/application-test.yml
     │
-    ├── user-service/
+    ├── user-service/                     # PostgreSQL + Kafka + Redis 7 + Liquibase
     │   ├── pom.xml
     │   └── src/
-    │       ├── main/java/com/logistics/user/UserServiceApplication.java
-    │       ├── main/resources/application.yml
-    │       ├── test/java/com/logistics/user/UserServiceApplicationTest.java
-    │       └── test/resources/application-test.yml
+    │       ├── main/java/com/logistics/user/
+    │       │   ├── UserServiceApplication.java
+    │       │   └── config/RedisConfig.java
+    │       ├── main/resources/
+    │       │   ├── application.yml
+    │       │   └── db/changelog/
+    │       │       ├── db.changelog-master.yaml
+    │       │       └── changes/001-create-users-table.yaml
+    │       └── test/
+    │           ├── java/com/logistics/user/
+    │           │   ├── UserServiceApplicationTest.java
+    │           │   ├── UserDatabaseConnectionTest.java
+    │           │   ├── UserLiquibaseMigrationTest.java
+    │           │   └── RedisSmokeIntegrationTest.java
+    │           └── resources/application-test.yml
     │
-    ├── order-service/
+    ├── order-service/                    # order_db persistence + Kafka + Liquibase
     │   ├── pom.xml
-    │   └── src/  (same layout as user-service)
+    │   └── src/
+    │       ├── main/java/com/logistics/order/
+    │       │   ├── OrderServiceApplication.java
+    │       │   └── config/KafkaTopicConfig.java
+    │       ├── main/resources/
+    │       │   ├── application.yml
+    │       │   └── db/changelog/
+    │       │       ├── db.changelog-master.yaml
+    │       │       └── changes/001-create-orders-table.yaml
+    │       └── test/
+    │           ├── java/com/logistics/order/
+    │           │   ├── OrderServiceApplicationTest.java
+    │           │   ├── OrderDatabaseConnectionTest.java
+    │           │   ├── OrderLiquibaseMigrationTest.java
+    │           │   └── KafkaProducerConsumerIntegrationTest.java
+    │           └── resources/application-test.yml
     │
-    ├── shipment-service/
+    ├── shipment-service/                 # shipment_db persistence + Kafka + Liquibase
     │   ├── pom.xml
-    │   └── src/  (same layout as user-service)
+    │   └── src/  (includes db/changelog/ & ShipmentLiquibaseMigrationTest)
     │
-    └── notification-service/
+    └── notification-service/             # notification_db persistence + Kafka + Liquibase
         ├── pom.xml
-        └── src/  (same layout as user-service)
+        └── src/  (includes db/changelog/ & NotificationLiquibaseMigrationTest)
 ```
 
 ---
@@ -220,82 +331,44 @@ logistics-platform/
 mvn clean package -DskipTests
 ```
 
-### Build a single module (with its dependencies)
-
-```bash
-mvn clean package -DskipTests -pl services/api-gateway -am
-```
-
 ### Run local development environment
 
-1. **Start infrastructure:**
+1. **Start infrastructure (PostgreSQL, Kafka, Redis, Mailpit):**
    ```bash
    docker compose up -d
    ```
 2. **Start microservices (in individual terminals or IDE):**
    ```bash
-   # Terminal 1: User Service (:8081)
    mvn spring-boot:run -pl services/user-service
-
-   # Terminal 2: Order Service (:8082)
    mvn spring-boot:run -pl services/order-service
-
-   # Terminal 3: Shipment Service (:8083)
    mvn spring-boot:run -pl services/shipment-service
-
-   # Terminal 4: Notification Service (:8084)
    mvn spring-boot:run -pl services/notification-service
-
-   # Terminal 5: API Gateway (:8080)
    mvn spring-boot:run -pl services/api-gateway
    ```
 
 ---
 
-## API Gateway
+## Database Migrations (Liquibase)
 
-### Role
+Every service with persistent storage manages its database schema migrations independently using Liquibase:
 
-The API Gateway is the **only entry point for external clients**. It listens on port **8080** and forwards requests to the appropriate backend service based on the URL path prefix.
+- **Isolated Master Changelog**: Located at `classpath:db/changelog/db.changelog-master.yaml`.
+- **Modular Changeset Directory**: Granular changesets reside in `db/changelog/changes/<seq>-<description>.yaml` and are included by the master.
+- **Automated Startup Migration**: Spring Boot runs pending migrations at service startup (`spring.liquibase.enabled: true`).
+- **DDL Governance**: Hibernate `ddl-auto` is set to `validate` to guarantee Liquibase is the single source of truth for DDL changes.
+- **Repeatable & Version Controlled**: Re-running migrations on fresh instances creates the exact schema with checksum tracking.
 
-### Route Table
+### Inspect Migration Status
 
-| Request path (client → Gateway) | Forwarded to | Backend service |
-|---|---|---|
-| `GET /api/users/**` | `http://<USER_SERVICE_URL>/users/**` | user-service (:8081) |
-| `GET /api/orders/**` | `http://<ORDER_SERVICE_URL>/orders/**` | order-service (:8082) |
-| `GET /api/shipments/**` | `http://<SHIPMENT_SERVICE_URL>/shipments/**` | shipment-service (:8083) |
-| `GET /api/notifications/**` | `http://<NOTIFICATION_SERVICE_URL>/notifications/**` | notification-service (:8084) |
-
-> `StripPrefix=1` removes the `/api` segment before forwarding, so backend services receive `/users/**`, `/orders/**`, etc. directly.
-
-### Health & Diagnostics
-
-```bash
-# Gateway health
-curl http://localhost:8080/actuator/health
-
-# Registered route table (requires management.endpoint.gateway.enabled=true)
-curl http://localhost:8080/actuator/gateway/routes
-```
-
-### Testing a request through the Gateway
-
-With all services running:
-
-```bash
-# Routes to user-service
-curl http://localhost:8080/api/users/actuator/health
-
-# Routes to order-service
-curl http://localhost:8080/api/orders/actuator/health
-
-# Routes to shipment-service
-curl http://localhost:8080/api/shipments/actuator/health
-
-# Routes to notification-service
-curl http://localhost:8080/api/notifications/actuator/health
-```
+1. **Via Spring Boot Actuator**:
+   ```bash
+   curl http://localhost:8081/actuator/liquibase | jq .
+   ```
+2. **Via PostgreSQL Metadata Tables**:
+   ```bash
+   docker exec -e PGPASSWORD=user_password logistics-postgres psql -U user_service_user -d user_db \
+     -c "SELECT id, author, exectype, orderexecuted FROM databasechangelog;"
+   ```
 
 ---
 
@@ -307,22 +380,39 @@ curl http://localhost:8080/api/notifications/actuator/health
 mvn test
 ```
 
-### Run tests for a single module
-
-```bash
-mvn test -pl services/api-gateway -am
-```
-
 ### Test coverage per module
 
-| Module | Tests |
-|---|---|
-| `common-lib` | 6 unit tests (`CommonUtilsTest`) |
-| `api-gateway` | 1 context smoke test + 5 route configuration tests (`GatewayRoutesConfigTest`) |
-| `user-service` | 1 context smoke test |
-| `order-service` | 1 context smoke test |
-| `shipment-service` | 1 context smoke test |
-| `notification-service` | 1 context smoke test |
+| Module | Tests | Descriptions |
+|---|---|---|
+| `common-lib` | 7 unit tests | `CommonUtilsTest` (6) + `DomainEventTest` (1) |
+| `api-gateway` | 6 tests | 1 context smoke test + 5 route configuration tests (`GatewayRoutesConfigTest`) |
+| `user-service` | 4 tests | 1 context smoke test + 1 DB connection + 1 Redis smoke test + 1 Liquibase migration test |
+| `order-service` | 4 tests | 1 context smoke test + 1 DB connection + 1 Kafka integration test + 1 Liquibase migration test |
+| `shipment-service` | 3 tests | 1 context smoke test + 1 DB connection + 1 Liquibase migration test |
+| `notification-service` | 3 tests | 1 context smoke test + 1 DB connection + 1 Liquibase migration test |
+
+**Total: 27 tests passing 100%.**
+
+---
+
+## Continuous Integration (CI)
+
+The repository is configured with an automated Continuous Integration pipeline using **GitHub Actions** ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)):
+
+- **Triggers**:
+  - `push` to the `main` branch.
+  - `pull_request` targeting the `main` branch.
+  - `workflow_dispatch` for manual triggering from the GitHub Actions console.
+- **Environment**:
+  - Runner: `ubuntu-latest`.
+  - Runtime: Eclipse Temurin JDK 21 LTS (`actions/setup-java@v4`).
+  - Dependency Caching: Automated Maven cache (`cache: 'maven'`) for rapid feedback loops.
+- **Pipeline Stages**:
+  1. **Checkout Repository**: Full workspace fetch (`actions/checkout@v4`).
+  2. **Environment Verification**: Verifies `java -version` and `mvn -version`.
+  3. **Multi-module Reactor Build & Test**: Runs `mvn -B clean verify --file pom.xml`, ensuring clean builds and executing all unit/integration tests across all 7 modules (`parent`, `common-lib`, `api-gateway`, `user-service`, `order-service`, `shipment-service`, `notification-service`).
+  4. **Strict Gating**: Any failure during compilation, package packaging, or test assertions exits with non-zero code, failing the CI run and blocking Pull Request merge.
+  5. **Step Summary**: Automatically generates a Markdown summary of the build run in the GitHub Actions summary tab.
 
 ---
 
@@ -346,16 +436,11 @@ cp .env.example .env
 | `ORDER_SERVICE_PORT` | `8082` | HTTP port for order-service |
 | `SHIPMENT_SERVICE_PORT` | `8083` | HTTP port for shipment-service |
 | `NOTIFICATION_SERVICE_PORT` | `8084` | HTTP port for notification-service |
-| `USER_SERVICE_URL` | `http://localhost:8081` | Gateway → user-service backend URL |
-| `ORDER_SERVICE_URL` | `http://localhost:8082` | Gateway → order-service backend URL |
-| `SHIPMENT_SERVICE_URL` | `http://localhost:8083` | Gateway → shipment-service backend URL |
-| `NOTIFICATION_SERVICE_URL` | `http://localhost:8084` | Gateway → notification-service backend URL |
 | `POSTGRES_PORT` | `5432` | PostgreSQL host port |
-| `POSTGRES_USER` | `postgres` | PostgreSQL username |
-| `POSTGRES_PASSWORD` | `postgres` | PostgreSQL password |
 | `REDIS_PORT` | `6379` | Redis host port |
+| `REDIS_HOST` | `localhost` | Redis host address |
 | `KAFKA_PORT` | `9092` | Kafka external broker port |
-| `KAFKA_UI_PORT` | `8090` | Kafka UI Web console port |
+| `KAFKA_BOOTSTRAP_SERVERS` | `localhost:9092` | Kafka cluster bootstrap servers address |
 | `MAILPIT_SMTP_PORT` | `1025` | Mailpit SMTP server port |
 | `MAILPIT_UI_PORT` | `8025` | Mailpit Web inbox UI port |
 
@@ -387,9 +472,29 @@ cp .env.example .env
 **Decision**: Deploy Kafka 3.8 in KRaft (Kafka Raft Metadata) mode without ZooKeeper.  
 **Rationale**: KRaft eliminates ZooKeeper management overhead, accelerates metadata propagation, reduces container footprint, and represents the modern production standard for Apache Kafka.
 
-### ADR-007: Database-per-Service Isolation
-**Decision**: PostgreSQL container automatically creates isolated databases (`user_db`, `order_db`, `shipment_db`, `notification_db`) via `init-databases.sql`.  
-**Rationale**: Enforces bounded contexts and loose coupling between services at the data tier, paving the way for independent database migrations.
+### ADR-007: Strict Database-per-Service Isolation & Role Access Control
+**Decision**: Each microservice is assigned its own PostgreSQL database and dedicated database user with password. Direct access across services is explicitly revoked (`REVOKE CONNECT ON DATABASE FROM PUBLIC`).  
+**Rationale**: Prevents data coupling, enforces domain boundary integrity, and eliminates hidden dependencies across bounded contexts.
+
+### ADR-008: Kubernetes-ready Liveness & Readiness Probes
+**Decision**: Actuator probes are enabled with database health verification attached to readiness state.  
+**Rationale**: Ensures traffic is only routed to application instances when the database connection pool is healthy and responsive.
+
+### ADR-009: Standard Event Envelope & Domain Topic Hierarchy
+**Decision**: Microservices exchange asynchronous events using the typed `DomainEvent<T>` envelope across hierarchical topic channels (`logistics.<domain>.events`).  
+**Rationale**: Standardizes event payload headers (`eventId`, `eventType`, `aggregateId`, `timestamp`) and simplifies auditing, tracing, and dead-letter queue routing without leaking service-internal data models.
+
+### ADR-010: Redis In-Memory Store Foundation
+**Decision**: Redis 7 is adopted as the dedicated in-memory key-value store using Lettuce client, JSON serializer, and Actuator health indicator.  
+**Rationale**: Provides single-digit millisecond read/write latency for ephemeral session state, tokens, distributed cache, and rate-limiting counters.
+
+### ADR-011: Liquibase Schema Versioning & Isolation
+**Decision**: Each persistent service manages its own database schema versioning via Liquibase changelogs (`db.changelog-master.yaml` with modular changesets under `changes/`). Migrations run automatically on application startup, and Hibernate DDL generation is restricted to `validate`.  
+**Rationale**: Guarantees reproducible, auditable database schemas, prevents cross-service schema coupling, enables zero-downtime evolutionary database design, and eliminates desynchronization between code and database state.
+
+### ADR-012: Continuous Integration via GitHub Actions
+**Decision**: Automate repository-level build and test execution via GitHub Actions (`ci.yml`) on Ubuntu runners with Temurin JDK 21 and Maven caching.  
+**Rationale**: Guarantees that every Push and Pull Request triggers a clean reactor verification (`mvn clean verify`) covering all 7 modules without depending on developer-local machine state. Any regression or test failure immediately fails the CI pipeline.
 
 ---
 
@@ -400,7 +505,9 @@ cp .env.example .env
 | **PB-001** | Repository initialization, monorepo structure, service skeletons | ✅ Completed |
 | **PB-002** | API Gateway (Spring Cloud Gateway), routing to all backend services | ✅ Completed |
 | **PB-003** | Docker Compose for infrastructure stack (Postgres, Kafka KRaft, Redis, Mailpit, Kafka UI) | ✅ Completed |
-| **PB-004** | PostgreSQL migrations (Liquibase/Flyway) & Persistence layer | ⏳ Next |
-| **PB-005** | Kafka asynchronous event integration between domain services | ⏳ Planned |
-| **PB-006** | Redis distributed caching & rate limiting | ⏳ Planned |
-| **PB-007+** | Business features implementation per domain service | ⏳ Planned |
+| **PB-004** | PostgreSQL Database-per-Service with strict role isolation & connection verification | ✅ Completed |
+| **PB-005** | Kafka asynchronous event foundation, topic provisioning & integration tests | ✅ Completed |
+| **PB-006** | Redis in-memory store foundation, configuration & set/get smoke tests | ✅ Completed |
+| **PB-007** | Liquibase database migrations, changelog modularity, metadata verification | ✅ Completed |
+| **PB-008** | Continuous Integration (CI) automated build/test pipeline via GitHub Actions | ✅ Completed |
+| **PB-009+** | Business features implementation per domain service | ⏳ Planned |
