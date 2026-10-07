@@ -1,0 +1,70 @@
+spring:
+  application:
+    name: api-gateway
+
+  cloud:
+    gateway:
+      # ---------------------------------------------------------------
+      # Route definitions
+      # ---------------------------------------------------------------
+      # Convention: /api/<resource>/** → <service-name>
+      #
+      # Each backend URL is injected via environment variable with a
+      # sensible localhost default for local development.
+      # In production / staging, set these variables to the actual
+      # internal service hostnames (e.g. http://user-service:8081).
+      #
+      # StripPrefix=1 removes the first path segment (/api) before
+      # forwarding so backend services receive /users/**, /orders/**, etc.
+      # Remove or adjust StripPrefix if backend services are updated to
+      # include the /api prefix in their own routing.
+      # ---------------------------------------------------------------
+      routes:
+        - id: user-service
+          uri: ${USER_SERVICE_URL:http://localhost:8081}
+          predicates:
+            - Path=/api/users/**
+          filters:
+            - StripPrefix=1
+
+        - id: order-service
+          uri: ${ORDER_SERVICE_URL:http://localhost:8082}
+          predicates:
+            - Path=/api/orders/**
+          filters:
+            - StripPrefix=1
+
+        - id: shipment-service
+          uri: ${SHIPMENT_SERVICE_URL:http://localhost:8083}
+          predicates:
+            - Path=/api/shipments/**
+          filters:
+            - StripPrefix=1
+
+        - id: notification-service
+          uri: ${NOTIFICATION_SERVICE_URL:http://localhost:8084}
+          predicates:
+            - Path=/api/notifications/**
+          filters:
+            - StripPrefix=1
+
+server:
+  port: ${GATEWAY_PORT:8080}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        # gateway endpoint exposes the full route table at /actuator/gateway/routes
+        include: health,info,gateway
+  endpoint:
+    health:
+      show-details: always
+    gateway:
+      enabled: true
+
+info:
+  app:
+    name: ${spring.application.name}
+    version: "@project.version@"
+    description: "API Gateway – single entry point for external clients"

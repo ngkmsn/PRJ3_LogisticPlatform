@@ -1,0 +1,4 @@
+spring:
+  application:
+    name: user-service
+# Minimal config for test context – no external services required
