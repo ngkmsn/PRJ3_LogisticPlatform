@@ -1,14 +1,15 @@
 package com.logistics.shipment;
 
+import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.test.context.ActiveProfiles;
 
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
-@ActiveProfiles("test")
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+@QuarkusTest
 class ShipmentServiceApplicationTest {
 
     @Test
     void contextLoads() {
+        assertTrue(true, "Quarkus ShipmentService application context loaded successfully");
     }
 }

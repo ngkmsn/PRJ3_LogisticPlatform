@@ -34,7 +34,7 @@ This repository is a Maven multi-module monorepo containing all platform service
                                   │  HTTP/REST  (port 8080)
                     ┌─────────────▼─────────────┐
                     │       API Gateway         │  ← PB-002 ✅
-                    │   Spring Cloud Gateway    │
+                    │   Quarkus & Vert.x Proxy  │
                     │   /api/<resource>/**      │
                     └──────┬──────┬──────┬──────┘
                            │      │      │
@@ -97,7 +97,7 @@ Each service is **independently deployable**, has its own isolated database sche
 | `order-service` | 8082 | Order lifecycle: create → assign → in-transit → delivered / cancelled | `order_db` (`order_service_user`) | Producer (`logistics.order.events`) | – |
 | `shipment-service` | 8083 | Physical shipment runs: vehicle & driver assignment, real-time location, proof-of-delivery | `shipment_db` (`shipment_service_user`) | Producer / Consumer (`logistics.shipment.events`) | – |
 | `notification-service` | 8084 | Outbound notifications (email, SMS, push) triggered by platform events | `notification_db` (`notification_service_user`) | Consumer (`logistics.*.events`) | – |
-| `common-lib` | – | Shared library: `ApiResponse<T>`, `LogisticsPlatformException`, `DomainEvent<T>`, `KafkaTopics`, `CommonUtils` | – | Shared envelopes | – |
+| `common-lib` | – | Shared library: `ApiResponse<T>`, `LogisticsPlatformException`, `DomainEvent<T>`, `KafkaTopics`, `CommonUtils`, `JwtTokenProvider` | – | Shared envelopes | – |
 
 ---
 
@@ -384,14 +384,14 @@ mvn test
 
 | Module | Tests | Descriptions |
 |---|---|---|
-| `common-lib` | 7 unit tests | `CommonUtilsTest` (6) + `DomainEventTest` (1) |
-| `api-gateway` | 6 tests | 1 context smoke test + 5 route configuration tests (`GatewayRoutesConfigTest`) |
-| `user-service` | 4 tests | 1 context smoke test + 1 DB connection + 1 Redis smoke test + 1 Liquibase migration test |
+| `common-lib` | 12 unit tests | `CommonUtilsTest` (6) + `DomainEventTest` (1) + `JwtTokenProviderTest` (5) |
+| `api-gateway` | 10 tests | 1 context smoke test + 6 route configuration tests + 3 routing integration tests (`GatewayAuthRoutingIntegrationTest`) |
+| `user-service` | 17 tests | 1 context smoke test + 1 DB connection + 1 Redis smoke + 1 Liquibase migration (3 changesets) + 5 auth service unit tests + 8 auth controller integration tests |
 | `order-service` | 4 tests | 1 context smoke test + 1 DB connection + 1 Kafka integration test + 1 Liquibase migration test |
 | `shipment-service` | 3 tests | 1 context smoke test + 1 DB connection + 1 Liquibase migration test |
 | `notification-service` | 3 tests | 1 context smoke test + 1 DB connection + 1 Liquibase migration test |
 
-**Total: 27 tests passing 100%.**
+**Total: 49 tests passing 100%.**
 
 ---
 
@@ -452,13 +452,13 @@ cp .env.example .env
 **Decision**: Use a single Git repository with Maven multi-module build.  
 **Rationale**: Simplifies cross-service refactoring, enforces single dependency version governance, and enables atomic commits across services.
 
-### ADR-002: Java 21 + Spring Boot 3.3
-**Decision**: All services use Java 21 LTS and Spring Boot 3.3.x.  
-**Rationale**: Java 21 LTS is standard across modern cloud providers. Spring Boot 3.3 brings virtual threads and Spring Framework 6.1 features.
+### ADR-002: Java 21 + Quarkus 3.15 LTS
+**Decision**: All platform services use Java 21 LTS and Quarkus 3.15.x LTS.  
+**Rationale**: Java 21 LTS provides modern language capabilities and virtual threads. Quarkus brings supersonic subatomic execution, near-instantaneous startup, minimal RSS memory footprint, and build-time optimization (ArC CDI synthesis, Panache ORM) ideal for high-density container environments.
 
-### ADR-003: Spring Cloud Gateway for API Gateway
-**Decision**: `spring-cloud-starter-gateway` (reactive, Netty-based) is used for the API Gateway module.  
-**Rationale**: Non-blocking asynchronous event loop delivers high throughput with minimal thread overhead. Configuration-as-code in `application.yml`.
+### ADR-003: Quarkus & Vert.x Reactive Reverse Proxy for API Gateway
+**Decision**: `api-gateway` is built on Quarkus with Vert.x Web Reactive Core and asynchronous streaming proxy.  
+**Rationale**: Non-blocking asynchronous event loop delivers maximum throughput with minimal thread and memory overhead, offering superior efficiency over legacy servlet or Spring gateways. Dynamic path forwarding and prefix stripping are managed natively via Vert.x handlers.
 
 ### ADR-004: Path-prefix Routing with StripPrefix
 **Decision**: Routes are defined by `/api/<resource>/**` prefix; `StripPrefix=1` removes `/api` before forwarding.  
@@ -496,6 +496,122 @@ cp .env.example .env
 **Decision**: Automate repository-level build and test execution via GitHub Actions (`ci.yml`) on Ubuntu runners with Temurin JDK 21 and Maven caching.  
 **Rationale**: Guarantees that every Push and Pull Request triggers a clean reactor verification (`mvn clean verify`) covering all 7 modules without depending on developer-local machine state. Any regression or test failure immediately fails the CI pipeline.
 
+### ADR-013: BCrypt Password Hashing & Stateless JWT Authentication
+**Decision**: Authentication is implemented in `user-service` with BCrypt password hashing (`BCryptPasswordEncoder`, cost factor 10) and signed JSON Web Tokens (`io.jsonwebtoken` HMAC-SHA256). All authentication requests route through the API Gateway via `/api/auth/**` (stripped to `/auth/**`) or `/auth/**`.
+**Rationale**:
+- Passwords are never stored in plaintext and never leaked in responses or logs (`LoginRequest.toString()` masks credentials).
+- Tokens are cryptographically signed with HMAC-SHA256 and include essential claims (`userId`, `username`, `email`, `role`, `issuedAt`, `expiration`) without requiring stateful session lookups on downstream services.
+- Secret and expiration settings are externalized to environment variables (`JWT_SECRET`, `JWT_EXPIRATION_MS`, `JWT_ISSUER`) with safe local development defaults.
+- Database-per-service isolation is preserved: `user_db` maintains user identity and credentials via Liquibase migrations (`001`, `002`, `003`), completely decoupled from other bounded contexts.
+
+### ADR-014: Tech Stack Migration to Quarkus 3.x (Java 21 LTS)
+**Decision**: Migrate the microservices architecture stack from Spring Boot to Quarkus 3.x (LTS) on Java 21, adopting a step-by-step phased approach starting with `common-lib` and `user-service`.  
+**Rationale**:
+- **Resource Footprint**: Quarkus reduces runtime heap memory consumption (typically ~40-80MB RSS on JVM vs ~250-400MB in Spring Boot), allowing multiple microservices to run efficiently on low-resource dev/prod nodes.
+- **Fast Startup**: Near-instantaneous cold start (< 1-2s JVM, < 0.05s Native), ideal for containerized scaling and serverless workloads.
+- **Build-Time Metadata**: Eliminates runtime reflection through build-time CDI synthesis (ArC), compile-time Panache ORM enhancements, and Ahead-Of-Time (AOT) optimizations.
+- **Standards-Based**: Employs Jakarta EE 10 standards (Jakarta REST, CDI, Bean Validation, Hibernate Panache) avoiding heavy framework-specific lock-in.
+
+---
+
+## Authentication & Development Accounts (PB-009)
+
+External clients send authentication requests to the API Gateway on port `8080`:
+
+### Endpoints
+- **Login**: `POST /api/auth/login` (or `POST /auth/login`)
+  ```json
+  {
+    "username": "admin",
+    "password": "Admin@123"
+  }
+  ```
+  **Success Response (200 OK)**:
+  ```json
+  {
+    "success": true,
+    "message": "Login successful",
+    "data": {
+      "accessToken": "eyJhbGciOiJIUzI1NiIsIn...",
+      "tokenType": "Bearer",
+      "expiresIn": 86400,
+      "user": {
+        "id": "00000000-0000-0000-0000-000000000001",
+        "username": "admin",
+        "email": "admin@logistics.com",
+        "role": "ADMIN",
+        "status": "ACTIVE"
+      }
+    }
+  }
+  ```
+  **Failure Response (401 Unauthorized)**:
+  ```json
+  {
+    "success": false,
+    "message": "Invalid username or password",
+    "data": null
+  }
+  ```
+- **Verify Token**: `GET /api/auth/verify` (Header: `Authorization: Bearer <token>`)
+- **Get Current User Profile (PB-010)**: `GET /api/auth/me` or `GET /api/users/me` (Header: `Authorization: Bearer <token>`)  
+  Extracts identity strictly from the cryptographically verified JWT claims without allowing arbitrary userId parameters.
+  **Success Response (200 OK)**:
+  ```json
+  {
+    "success": true,
+    "message": "User profile retrieved successfully",
+    "data": {
+      "userId": "00000000-0000-0000-0000-000000000001",
+      "username": "admin",
+      "email": "admin@logistics.com",
+      "role": "ADMIN",
+      "status": "ACTIVE",
+      "createdAt": "2026-10-09T08:00:51.670Z",
+      "updatedAt": "2026-10-09T08:00:51.670Z"
+    }
+  }
+  ```
+  **Unauthenticated / Invalid Token Response (401 Unauthorized)**:
+  ```json
+  {
+    "success": false,
+    "message": "Missing or invalid Authorization header",
+    "data": null
+  }
+  ```
+
+### Seeded Sample Accounts for Local Development
+Seeded automatically via Liquibase changeset `003-seed-sample-users.yaml`:
+
+| Username | Email | Password | Role | Status |
+|---|---|---|---|---|
+| `admin` | `admin@logistics.com` | `Admin@123` | `ADMIN` | `ACTIVE` |
+| `dispatcher` | `dispatcher@logistics.com` | `Dispatcher@123` | `DISPATCHER` | `ACTIVE` |
+| `driver` | `driver@logistics.com` | `Driver@123` | `DRIVER` | `ACTIVE` |
+| `customer` | `customer@logistics.com` | `Customer@123` | `CUSTOMER` | `ACTIVE` |
+
+---
+
+## User Management: Administrator APIs (PB-011)
+
+All endpoints require an active `ADMIN` token (`Authorization: Bearer <token>`). Requests from non-admin roles are rejected with `403 Forbidden`. Requests without a token are rejected with `401 Unauthorized`.
+
+| Method | Endpoint (via Gateway) | Description |
+|---|---|---|
+| `GET` | `/api/users?page=0&size=10&role=DRIVER&status=ACTIVE` | View user list with pagination & optional filtering |
+| `GET` | `/api/users/{id}` | View user details (no password/hash exposed) |
+| `POST` | `/api/users` | Create new user (body: `username`, `email`, `password`, `role`, optional `status`) |
+| `PATCH` | `/api/users/{id}` | Update user fields (`email`, `role`, `status`) |
+| `PATCH` | `/api/users/{id}/status` | Lock or unlock user account (`status`: `"LOCKED"` or `"ACTIVE"`) |
+
+### Key Business Rules
+- **BCrypt Hashing**: Passwords submitted via `POST /api/users` are hashed using BCrypt (cost factor 10) before persisting; plaintext is never saved or returned.
+- **Uniqueness**: Duplicate `username` or `email` rejections return `409 Conflict`.
+- **Locked Accounts Blocked**: Accounts set to `LOCKED` cannot log in (`403 Forbidden` on login attempt) and existing tokens cannot retrieve profiles.
+- **Last Admin Protection**: The system strictly prevents locking, deactivating, or demoting the last remaining active Administrator (`400 Bad Request`).
+- **No Hard Deletes**: User management enforces soft-lock / state deactivation rather than destructive row deletion.
+
 ---
 
 ## Roadmap
@@ -503,11 +619,16 @@ cp .env.example .env
 | PB Item | Scope | Status |
 |---|---|---|
 | **PB-001** | Repository initialization, monorepo structure, service skeletons | ✅ Completed |
-| **PB-002** | API Gateway (Spring Cloud Gateway), routing to all backend services | ✅ Completed |
+| **PB-002** | API Gateway (Quarkus + Vert.x Reverse Proxy), routing to all backend services | ✅ Completed |
 | **PB-003** | Docker Compose for infrastructure stack (Postgres, Kafka KRaft, Redis, Mailpit, Kafka UI) | ✅ Completed |
 | **PB-004** | PostgreSQL Database-per-Service with strict role isolation & connection verification | ✅ Completed |
 | **PB-005** | Kafka asynchronous event foundation, topic provisioning & integration tests | ✅ Completed |
 | **PB-006** | Redis in-memory store foundation, configuration & set/get smoke tests | ✅ Completed |
 | **PB-007** | Liquibase database migrations, changelog modularity, metadata verification | ✅ Completed |
 | **PB-008** | Continuous Integration (CI) automated build/test pipeline via GitHub Actions | ✅ Completed |
-| **PB-009+** | Business features implementation per domain service | ⏳ Planned |
+| **PB-009** | Authentication / Đăng nhập: API Gateway routing, BCrypt hashing, JWT issuance & verification | ✅ Completed |
+| **PB-010** | Lấy thông tin user hiện tại (`GET /auth/me`, `/users/me`) qua Bearer JWT token | ✅ Completed |
+| **PB-011** | User Management: Administrator quản lý, phân trang, tạo, sửa, khóa/mở khóa tài khoản | ✅ Completed |
+| **PB-012+** | Business features: Order lifecycle, dispatching, shipment tracking, real-time events | ⏳ Planned |
+
+

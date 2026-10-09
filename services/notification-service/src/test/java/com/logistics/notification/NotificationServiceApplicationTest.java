@@ -1,14 +1,15 @@
 package com.logistics.notification;
 
+import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.test.context.ActiveProfiles;
 
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
-@ActiveProfiles("test")
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+@QuarkusTest
 class NotificationServiceApplicationTest {
 
     @Test
     void contextLoads() {
+        assertTrue(true, "Quarkus NotificationService application context loaded successfully");
     }
 }
