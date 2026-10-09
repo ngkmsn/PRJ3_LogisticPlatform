@@ -4,6 +4,7 @@ import com.logistics.common.security.JwtTokenProvider;
 import com.logistics.user.dto.CreateUserRequest;
 import com.logistics.user.dto.LoginRequest;
 import com.logistics.user.dto.UpdateUserRequest;
+import com.logistics.user.dto.UpdateUserRoleRequest;
 import com.logistics.user.dto.UpdateUserStatusRequest;
 import com.logistics.user.entity.UserRole;
 import com.logistics.user.entity.UserStatus;
@@ -314,5 +315,183 @@ class UserManagementIntegrationTest {
                 .statusCode(400)
                 .body("success", equalTo(false))
                 .body("message", containsString("last remaining active Administrator"));
+    }
+
+    @Test
+    @DisplayName("GET /users/roles by Admin returns supported roles and permissions")
+    void listSupportedRoles_admin_success() {
+        given()
+                .header("Authorization", adminToken)
+                .when()
+                .get("/users/roles")
+                .then()
+                .statusCode(200)
+                .body("success", equalTo(true))
+                .body("data.size()", equalTo(4))
+                .body("data.role", org.hamcrest.Matchers.hasItems("ADMIN", "DISPATCHER", "DRIVER", "CUSTOMER"))
+                .body("data.find { it.role == 'ADMIN' }.permissions.size()", greaterThanOrEqualTo(10));
+    }
+
+    @Test
+    @DisplayName("GET /users/roles by non-Admin is rejected with 403 Forbidden")
+    void listSupportedRoles_nonAdmin_forbidden() {
+        given()
+                .header("Authorization", driverToken)
+                .when()
+                .get("/users/roles")
+                .then()
+                .statusCode(403)
+                .body("success", equalTo(false))
+                .body("message", containsString("Administrator privileges required"));
+    }
+
+    @Test
+    @DisplayName("GET /users/roles unauthenticated is rejected with 401 Unauthorized")
+    void listSupportedRoles_unauthenticated_unauthorized() {
+        given()
+                .when()
+                .get("/users/roles")
+                .then()
+                .statusCode(401)
+                .body("success", equalTo(false))
+                .body("message", containsString("Missing or invalid"));
+    }
+
+    @Test
+    @DisplayName("PATCH /users/{id}/role updates user role successfully")
+    void updateUserRole_success() {
+        String testUser = "roleuser_" + System.currentTimeMillis();
+        CreateUserRequest createReq = new CreateUserRequest(
+                testUser,
+                testUser + "@logistics.com",
+                "Password@123",
+                UserRole.CUSTOMER
+        );
+
+        String id = given()
+                .header("Authorization", adminToken)
+                .contentType(ContentType.JSON)
+                .body(createReq)
+                .when()
+                .post("/users")
+                .then()
+                .statusCode(201)
+                .extract()
+                .path("data.userId");
+
+        // Update role from CUSTOMER to DRIVER
+        given()
+                .header("Authorization", adminToken)
+                .contentType(ContentType.JSON)
+                .body(new UpdateUserRoleRequest(UserRole.DRIVER))
+                .when()
+                .patch("/users/" + id + "/role")
+                .then()
+                .statusCode(200)
+                .body("success", equalTo(true))
+                .body("data.role", equalTo("DRIVER"));
+
+        // Verify the profile reflects DRIVER
+        given()
+                .header("Authorization", adminToken)
+                .when()
+                .get("/users/" + id)
+                .then()
+                .statusCode(200)
+                .body("data.role", equalTo("DRIVER"));
+    }
+
+    @Test
+    @DisplayName("PATCH /users/{id}/role by non-Admin is rejected with 403 Forbidden")
+    void updateUserRole_nonAdmin_forbidden() {
+        given()
+                .header("Authorization", driverToken)
+                .contentType(ContentType.JSON)
+                .body(new UpdateUserRoleRequest(UserRole.ADMIN))
+                .when()
+                .patch("/users/00000000-0000-0000-0000-000000000003/role")
+                .then()
+                .statusCode(403)
+                .body("success", equalTo(false))
+                .body("message", containsString("Administrator privileges required"));
+    }
+
+    @Test
+    @DisplayName("PATCH /users/{id}/role preventing demotion of the last remaining Administrator")
+    void demoteLastAdmin_badRequest() {
+        given()
+                .header("Authorization", adminToken)
+                .contentType(ContentType.JSON)
+                .body(new UpdateUserRoleRequest(UserRole.CUSTOMER))
+                .when()
+                .patch("/users/00000000-0000-0000-0000-000000000001/role")
+                .then()
+                .statusCode(400)
+                .body("success", equalTo(false))
+                .body("message", containsString("Cannot demote the last remaining active Administrator"));
+    }
+
+    @Test
+    @DisplayName("Revoking administrator role immediately invalidates administrator access for old token")
+    void demotedAdmin_tokenRevocationEffect() {
+        // 1. Create a second admin user
+        String admin2Username = "admin2_" + System.currentTimeMillis();
+        CreateUserRequest createReq = new CreateUserRequest(
+                admin2Username,
+                admin2Username + "@logistics.com",
+                "Admin2Secret@123",
+                UserRole.ADMIN
+        );
+
+        String admin2Id = given()
+                .header("Authorization", adminToken)
+                .contentType(ContentType.JSON)
+                .body(createReq)
+                .when()
+                .post("/users")
+                .then()
+                .statusCode(201)
+                .extract()
+                .path("data.userId");
+
+        // 2. Admin2 logs in and gets an admin token
+        String admin2Token = "Bearer " + given()
+                .contentType(ContentType.JSON)
+                .body(new LoginRequest(admin2Username, "Admin2Secret@123"))
+                .when()
+                .post("/auth/login")
+                .then()
+                .statusCode(200)
+                .extract()
+                .path("data.accessToken");
+
+        // 3. Admin2 can initially access admin endpoints
+        given()
+                .header("Authorization", admin2Token)
+                .when()
+                .get("/users")
+                .then()
+                .statusCode(200);
+
+        // 4. Primary Admin demotes Admin2 to CUSTOMER
+        given()
+                .header("Authorization", adminToken)
+                .contentType(ContentType.JSON)
+                .body(new UpdateUserRoleRequest(UserRole.CUSTOMER))
+                .when()
+                .patch("/users/" + admin2Id + "/role")
+                .then()
+                .statusCode(200)
+                .body("data.role", equalTo("CUSTOMER"));
+
+        // 5. Old token of Admin2 must be IMMEDIATELY rejected with 403 Forbidden even though JWT is not expired
+        given()
+                .header("Authorization", admin2Token)
+                .when()
+                .get("/users")
+                .then()
+                .statusCode(403)
+                .body("success", equalTo(false))
+                .body("message", containsString("revoked"));
     }
 }

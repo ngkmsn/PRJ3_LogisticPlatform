@@ -222,4 +222,56 @@ class UserServiceTest {
                 .isInstanceOf(CannotLockLastAdminException.class)
                 .hasMessageContaining("last remaining active Administrator");
     }
+
+    @Test
+    @DisplayName("Admin can view list of supported roles and their permissions")
+    void listSupportedRoles_success() {
+        when(userRepository.findByIdOptional("admin-uuid-001")).thenReturn(Optional.of(adminUser));
+
+        var roles = userService.listSupportedRoles(adminToken);
+
+        assertThat(roles).isNotNull();
+        assertThat(roles).hasSize(4);
+        assertThat(roles).extracting("role").containsExactlyInAnyOrder("ADMIN", "DISPATCHER", "DRIVER", "CUSTOMER");
+    }
+
+    @Test
+    @DisplayName("Admin can update role of a user")
+    void updateUserRole_success() {
+        when(userRepository.findByIdOptional("admin-uuid-001")).thenReturn(Optional.of(adminUser));
+        User target = new User("target-01", "targetuser", "target@logistics.com", "hash", UserRole.CUSTOMER, UserStatus.ACTIVE);
+        when(userRepository.findByIdOptional("target-01")).thenReturn(Optional.of(target));
+
+        var request = new com.logistics.user.dto.UpdateUserRoleRequest(UserRole.DRIVER);
+        UserProfileDto updated = userService.updateUserRole(adminToken, "target-01", request);
+
+        assertThat(updated).isNotNull();
+        assertThat(updated.getRole()).isEqualTo("DRIVER");
+        verify(userRepository).persist(target);
+    }
+
+    @Test
+    @DisplayName("Cannot demote the last remaining active Administrator in the system")
+    void demoteLastAdmin_prevented() {
+        when(userRepository.findByIdOptional("admin-uuid-001")).thenReturn(Optional.of(adminUser));
+        when(userRepository.countActiveAdmins()).thenReturn(1L);
+
+        var request = new com.logistics.user.dto.UpdateUserRoleRequest(UserRole.CUSTOMER);
+
+        assertThatThrownBy(() -> userService.updateUserRole(adminToken, "admin-uuid-001", request))
+                .isInstanceOf(CannotLockLastAdminException.class)
+                .hasMessageContaining("Cannot demote the last remaining active Administrator");
+    }
+
+    @Test
+    @DisplayName("Revoked admin token is immediately rejected if role in database is no longer ADMIN")
+    void revokedAdminRole_immediatelyDenied() {
+        // Token has role ADMIN, but user in database was demoted to DRIVER
+        User demotedUser = new User("admin-uuid-001", "admin", "admin@logistics.com", "hash", UserRole.DRIVER, UserStatus.ACTIVE);
+        when(userRepository.findByIdOptional("admin-uuid-001")).thenReturn(Optional.of(demotedUser));
+
+        assertThatThrownBy(() -> userService.listUsers(adminToken, 0, 10, null, null))
+                .isInstanceOf(AccessDeniedException.class)
+                .hasMessageContaining("revoked");
+    }
 }

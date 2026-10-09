@@ -1,9 +1,12 @@
 package com.logistics.user.service;
 
 import com.logistics.common.security.JwtTokenProvider;
+import com.logistics.common.security.Role;
 import com.logistics.user.dto.CreateUserRequest;
 import com.logistics.user.dto.PagedResponse;
+import com.logistics.user.dto.RoleInfoDto;
 import com.logistics.user.dto.UpdateUserRequest;
+import com.logistics.user.dto.UpdateUserRoleRequest;
 import com.logistics.user.dto.UpdateUserStatusRequest;
 import com.logistics.user.dto.UserProfileDto;
 import com.logistics.user.entity.User;
@@ -27,6 +30,7 @@ import org.slf4j.LoggerFactory;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
 
@@ -72,6 +76,11 @@ public class UserService {
         if (adminUser.getStatus() != UserStatus.ACTIVE) {
             log.warn("Admin authorization rejected: admin account status is {}", adminUser.getStatus());
             throw new AccountNotActiveException(adminUser.getStatus().name());
+        }
+
+        if (adminUser.getRole() != UserRole.ADMIN) {
+            log.warn("Admin authorization rejected: caller user '{}' role in database is '{}', no longer Administrator", userId, adminUser.getRole());
+            throw new AccessDeniedException("Access denied: Administrator privileges revoked");
         }
 
         return adminUser;
@@ -226,6 +235,39 @@ public class UserService {
         userRepository.persist(user);
 
         log.info("Administrator changed user status: id='{}', newStatus='{}'", user.getId(), user.getStatus());
+
+        return UserProfileDto.fromEntity(user);
+    }
+
+    public List<RoleInfoDto> listSupportedRoles(String authHeader) {
+        requireAdmin(authHeader);
+
+        return Arrays.stream(Role.values())
+                .map(RoleInfoDto::fromRole)
+                .toList();
+    }
+
+    @Transactional
+    public UserProfileDto updateUserRole(String authHeader, String id, UpdateUserRoleRequest request) {
+        requireAdmin(authHeader);
+
+        User user = userRepository.findByIdOptional(id)
+                .orElseThrow(() -> new UserNotFoundException("User not found with id: " + id));
+
+        // Guard against demoting the last active administrator
+        if (user.getRole() == UserRole.ADMIN && user.getStatus() == UserStatus.ACTIVE && request.getRole() != UserRole.ADMIN) {
+            long activeAdminsCount = userRepository.countActiveAdmins();
+            if (activeAdminsCount <= 1) {
+                log.warn("Demote user rejected: attempt to demote the last active administrator");
+                throw new CannotLockLastAdminException("Cannot demote the last remaining active Administrator in the system");
+            }
+        }
+
+        user.setRole(request.getRole());
+        user.setUpdatedAt(Instant.now());
+        userRepository.persist(user);
+
+        log.info("Administrator changed user role: id='{}', newRole='{}'", user.getId(), user.getRole());
 
         return UserProfileDto.fromEntity(user);
     }

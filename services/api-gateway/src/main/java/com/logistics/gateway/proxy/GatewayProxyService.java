@@ -52,6 +52,8 @@ public class GatewayProxyService {
         routeDefinitions.add(new GatewayRouteDefinition("auth-service", userServiceUrl, "/api/auth", true));
         routeDefinitions.add(new GatewayRouteDefinition("auth-service-direct", userServiceUrl, "/auth", false));
         routeDefinitions.add(new GatewayRouteDefinition("user-service", userServiceUrl, "/api/users", true));
+        routeDefinitions.add(new GatewayRouteDefinition("driver-service", userServiceUrl, "/api/drivers", true));
+        routeDefinitions.add(new GatewayRouteDefinition("driver-service-direct", userServiceUrl, "/drivers", false));
         routeDefinitions.add(new GatewayRouteDefinition("order-service", orderServiceUrl, "/api/orders", true));
         routeDefinitions.add(new GatewayRouteDefinition("shipment-service", shipmentServiceUrl, "/api/shipments", true));
         routeDefinitions.add(new GatewayRouteDefinition("notification-service", notificationServiceUrl, "/api/notifications", true));
@@ -124,7 +126,7 @@ public class GatewayProxyService {
 
     private String resolveEnvKey(String routeId) {
         return switch (routeId) {
-            case "auth-service", "auth-service-direct", "user-service" -> "USER_SERVICE_URL";
+            case "auth-service", "auth-service-direct", "user-service", "driver-service", "driver-service-direct" -> "USER_SERVICE_URL";
             case "order-service" -> "ORDER_SERVICE_URL";
             case "shipment-service" -> "SHIPMENT_SERVICE_URL";
             case "notification-service" -> "NOTIFICATION_SERVICE_URL";

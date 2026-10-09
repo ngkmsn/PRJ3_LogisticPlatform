@@ -3,7 +3,9 @@ package com.logistics.user.controller;
 import com.logistics.common.dto.ApiResponse;
 import com.logistics.user.dto.CreateUserRequest;
 import com.logistics.user.dto.PagedResponse;
+import com.logistics.user.dto.RoleInfoDto;
 import com.logistics.user.dto.UpdateUserRequest;
+import com.logistics.user.dto.UpdateUserRoleRequest;
 import com.logistics.user.dto.UpdateUserStatusRequest;
 import com.logistics.user.dto.UserProfileDto;
 import com.logistics.user.service.AuthenticationService;
@@ -24,6 +26,8 @@ import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
+import java.util.List;
+
 @Path("/users")
 @Produces(MediaType.APPLICATION_JSON)
 @Consumes(MediaType.APPLICATION_JSON)
@@ -41,6 +45,13 @@ public class UserController {
     public Response getCurrentUser(@HeaderParam("Authorization") String authHeader) {
         UserProfileDto profile = authenticationService.getCurrentUserProfile(authHeader);
         return Response.ok(ApiResponse.ok("User profile retrieved successfully", profile)).build();
+    }
+
+    @GET
+    @Path("/roles")
+    public Response listSupportedRoles(@HeaderParam("Authorization") String authHeader) {
+        List<RoleInfoDto> roles = userService.listSupportedRoles(authHeader);
+        return Response.ok(ApiResponse.ok("Supported roles and permissions retrieved successfully", roles)).build();
     }
 
     @GET
@@ -91,5 +102,15 @@ public class UserController {
             @Valid UpdateUserStatusRequest request) {
         UserProfileDto updated = userService.updateUserStatus(authHeader, id, request);
         return Response.ok(ApiResponse.ok("User status updated successfully", updated)).build();
+    }
+
+    @PATCH
+    @Path("/{id}/role")
+    public Response updateUserRole(
+            @HeaderParam("Authorization") String authHeader,
+            @PathParam("id") String id,
+            @Valid UpdateUserRoleRequest request) {
+        UserProfileDto updated = userService.updateUserRole(authHeader, id, request);
+        return Response.ok(ApiResponse.ok("User role updated successfully", updated)).build();
     }
 }

@@ -1,0 +1,76 @@
+databaseChangeLog:
+  - changeSet:
+      id: 002-add-order-details-and-items
+      author: logistics-team
+      changes:
+        - addColumn:
+            tableName: orders
+            columns:
+              - column:
+                  name: recipient_name
+                  type: VARCHAR(100)
+                  defaultValue: "Chưa cập nhật"
+                  constraints:
+                    nullable: false
+              - column:
+                  name: recipient_phone
+                  type: VARCHAR(20)
+                  defaultValue: "0000000000"
+                  constraints:
+                    nullable: false
+              - column:
+                  name: delivery_address
+                  type: VARCHAR(255)
+                  defaultValue: "Chưa cập nhật"
+                  constraints:
+                    nullable: false
+              - column:
+                  name: total_amount
+                  type: DECIMAL(12, 2)
+                  defaultValueNumeric: 0.00
+                  constraints:
+                    nullable: false
+              - column:
+                  name: notes
+                  type: VARCHAR(500)
+              - column:
+                  name: updated_at
+                  type: TIMESTAMP
+
+        - createTable:
+            tableName: order_items
+            columns:
+              - column:
+                  name: id
+                  type: VARCHAR(36)
+                  constraints:
+                    primaryKey: true
+                    nullable: false
+              - column:
+                  name: order_id
+                  type: VARCHAR(36)
+                  constraints:
+                    nullable: false
+                    foreignKeyName: fk_order_items_order_id
+                    references: orders(id)
+                    deleteCascade: true
+              - column:
+                  name: product_name
+                  type: VARCHAR(100)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: quantity
+                  type: INT
+                  constraints:
+                    nullable: false
+              - column:
+                  name: unit_price
+                  type: DECIMAL(12, 2)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: total_price
+                  type: DECIMAL(12, 2)
+                  constraints:
+                    nullable: false

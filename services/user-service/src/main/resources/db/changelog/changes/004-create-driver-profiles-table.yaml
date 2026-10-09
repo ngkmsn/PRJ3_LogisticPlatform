@@ -1,0 +1,121 @@
+databaseChangeLog:
+  - changeSet:
+      id: 004-create-driver-profiles-table
+      author: logistics-team
+      changes:
+        - createTable:
+            tableName: driver_profiles
+            columns:
+              - column:
+                  name: id
+                  type: VARCHAR(36)
+                  constraints:
+                    primaryKey: true
+                    nullable: false
+              - column:
+                  name: user_id
+                  type: VARCHAR(36)
+                  constraints:
+                    nullable: false
+                    unique: true
+                    foreignKeyName: fk_driver_profiles_user_id
+                    references: users(id)
+              - column:
+                  name: full_name
+                  type: VARCHAR(100)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: phone_number
+                  type: VARCHAR(20)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: license_number
+                  type: VARCHAR(50)
+                  constraints:
+                    nullable: false
+                    unique: true
+              - column:
+                  name: license_class
+                  type: VARCHAR(20)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: vehicle_type
+                  type: VARCHAR(50)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: vehicle_plate
+                  type: VARCHAR(30)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: address
+                  type: VARCHAR(255)
+              - column:
+                  name: status
+                  type: VARCHAR(30)
+                  defaultValue: "ACTIVE"
+                  constraints:
+                    nullable: false
+              - column:
+                  name: created_at
+                  type: TIMESTAMP
+                  constraints:
+                    nullable: false
+              - column:
+                  name: updated_at
+                  type: TIMESTAMP
+        - createIndex:
+            tableName: driver_profiles
+            indexName: idx_driver_profiles_user_id
+            columns:
+              - column:
+                  name: user_id
+        - createIndex:
+            tableName: driver_profiles
+            indexName: idx_driver_profiles_license_number
+            columns:
+              - column:
+                  name: license_number
+        - insert:
+            tableName: driver_profiles
+            columns:
+              - column:
+                  name: id
+                  value: "00000000-0000-0000-0001-000000000001"
+              - column:
+                  name: user_id
+                  value: "00000000-0000-0000-0000-000000000003"
+              - column:
+                  name: full_name
+                  value: "Nguyễn Văn Lái Xe"
+              - column:
+                  name: phone_number
+                  value: "0988776655"
+              - column:
+                  name: license_number
+                  value: "GPLX-79A-998877"
+              - column:
+                  name: license_class
+                  value: "C"
+              - column:
+                  name: vehicle_type
+                  value: "TRUCK_2T"
+              - column:
+                  name: vehicle_plate
+                  value: "29C-888.99"
+              - column:
+                  name: address
+                  value: "Hà Nội, Việt Nam"
+              - column:
+                  name: status
+                  value: "ACTIVE"
+              - column:
+                  name: created_at
+                  valueDate: "now()"
+              - column:
+                  name: updated_at
+                  valueDate: "now()"

@@ -2,6 +2,7 @@ package com.logistics.user.controller;
 
 import com.logistics.user.dto.CreateUserRequest;
 import com.logistics.user.dto.UpdateUserRequest;
+import com.logistics.user.dto.UpdateUserRoleRequest;
 import com.logistics.user.dto.UpdateUserStatusRequest;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -32,6 +33,12 @@ public class ApiUserResource {
     @Path("/me")
     public Response getCurrentUser(@HeaderParam("Authorization") String authHeader) {
         return userController.getCurrentUser(authHeader);
+    }
+
+    @GET
+    @Path("/roles")
+    public Response listSupportedRoles(@HeaderParam("Authorization") String authHeader) {
+        return userController.listSupportedRoles(authHeader);
     }
 
     @GET
@@ -75,5 +82,14 @@ public class ApiUserResource {
             @PathParam("id") String id,
             @Valid UpdateUserStatusRequest request) {
         return userController.updateUserStatus(authHeader, id, request);
+    }
+
+    @PATCH
+    @Path("/{id}/role")
+    public Response updateUserRole(
+            @HeaderParam("Authorization") String authHeader,
+            @PathParam("id") String id,
+            @Valid UpdateUserRoleRequest request) {
+        return userController.updateUserRole(authHeader, id, request);
     }
 }

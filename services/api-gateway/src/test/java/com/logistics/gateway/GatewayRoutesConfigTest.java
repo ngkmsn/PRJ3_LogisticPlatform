@@ -19,6 +19,8 @@ class GatewayRoutesConfigTest {
             "auth-service",
             "auth-service-direct",
             "user-service",
+            "driver-service",
+            "driver-service-direct",
             "order-service",
             "shipment-service",
             "notification-service"
@@ -65,6 +67,12 @@ class GatewayRoutesConfigTest {
     @Test
     void userServiceRouteIsRegistered() {
         assertRouteExists("user-service");
+    }
+
+    @Test
+    void driverServiceRouteIsRegistered() {
+        assertRouteExists("driver-service");
+        assertRouteExists("driver-service-direct");
     }
 
     @Test

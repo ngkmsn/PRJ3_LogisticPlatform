@@ -5,3 +5,7 @@ databaseChangeLog:
       file: db/changelog/changes/002-add-auth-columns.yaml
   - include:
       file: db/changelog/changes/003-seed-sample-users.yaml
+  - include:
+      file: db/changelog/changes/004-create-driver-profiles-table.yaml
+  - include:
+      file: db/changelog/changes/005-add-driver-availability.yaml

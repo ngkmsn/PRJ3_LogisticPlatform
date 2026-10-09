@@ -1,0 +1,21 @@
+databaseChangeLog:
+  - changeSet:
+      id: 005-add-driver-availability
+      author: logistics-team
+      changes:
+        - addColumn:
+            tableName: driver_profiles
+            columns:
+              - column:
+                  name: availability
+                  type: VARCHAR(20)
+                  defaultValue: "UNAVAILABLE"
+                  constraints:
+                    nullable: false
+        - update:
+            tableName: driver_profiles
+            columns:
+              - column:
+                  name: availability
+                  value: "UNAVAILABLE"
+            where: "availability IS NULL"

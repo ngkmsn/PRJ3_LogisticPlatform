@@ -105,4 +105,64 @@ public class GlobalExceptionHandler {
                     .build();
         }
     }
+
+    @Provider
+    public static class DriverProfileNotFoundMapper implements ExceptionMapper<DriverProfileNotFoundException> {
+        @Override
+        public Response toResponse(DriverProfileNotFoundException exception) {
+            log.warn("Driver profile not found: {}", exception.getMessage());
+            return Response.status(Response.Status.NOT_FOUND)
+                    .type(MediaType.APPLICATION_JSON)
+                    .entity(ApiResponse.error(exception.getMessage()))
+                    .build();
+        }
+    }
+
+    @Provider
+    public static class DriverProfileAlreadyExistsMapper implements ExceptionMapper<DriverProfileAlreadyExistsException> {
+        @Override
+        public Response toResponse(DriverProfileAlreadyExistsException exception) {
+            log.warn("Driver profile conflict: {}", exception.getMessage());
+            return Response.status(Response.Status.CONFLICT)
+                    .type(MediaType.APPLICATION_JSON)
+                    .entity(ApiResponse.error(exception.getMessage()))
+                    .build();
+        }
+    }
+
+    @Provider
+    public static class LicenseAlreadyRegisteredMapper implements ExceptionMapper<LicenseAlreadyRegisteredException> {
+        @Override
+        public Response toResponse(LicenseAlreadyRegisteredException exception) {
+            log.warn("Driver license conflict: {}", exception.getMessage());
+            return Response.status(Response.Status.CONFLICT)
+                    .type(MediaType.APPLICATION_JSON)
+                    .entity(ApiResponse.error(exception.getMessage()))
+                    .build();
+        }
+    }
+
+    @Provider
+    public static class InvalidDriverUserMapper implements ExceptionMapper<InvalidDriverUserException> {
+        @Override
+        public Response toResponse(InvalidDriverUserException exception) {
+            log.warn("Invalid driver user: {}", exception.getMessage());
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .type(MediaType.APPLICATION_JSON)
+                    .entity(ApiResponse.error(exception.getMessage()))
+                    .build();
+        }
+    }
+
+    @Provider
+    public static class IllegalArgumentExceptionMapper implements ExceptionMapper<IllegalArgumentException> {
+        @Override
+        public Response toResponse(IllegalArgumentException exception) {
+            log.warn("Illegal argument: {}", exception.getMessage());
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .type(MediaType.APPLICATION_JSON)
+                    .entity(ApiResponse.error(exception.getMessage()))
+                    .build();
+        }
+    }
 }

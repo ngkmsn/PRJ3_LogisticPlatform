@@ -92,7 +92,15 @@ class GatewayAuthRoutingIntegrationTest {
                         os.write(error.getBytes(StandardCharsets.UTF_8));
                     }
                 } else {
-                    String resp = "{\"success\":true,\"message\":\"Operation successful\",\"data\":{\"userId\":\"user-123\",\"username\":\"newuser\",\"role\":\"DISPATCHER\"}}";
+                    String path = exchange.getRequestURI().getPath();
+                    String resp;
+                    if (path.endsWith("/roles")) {
+                        resp = "{\"success\":true,\"message\":\"Supported roles and permissions retrieved successfully\",\"data\":[{\"role\":\"ADMIN\"},{\"role\":\"DISPATCHER\"},{\"role\":\"DRIVER\"},{\"role\":\"CUSTOMER\"}]}";
+                    } else if (path.endsWith("/role")) {
+                        resp = "{\"success\":true,\"message\":\"User role updated successfully\",\"data\":{\"userId\":\"user-123\",\"role\":\"DRIVER\"}}";
+                    } else {
+                        resp = "{\"success\":true,\"message\":\"Operation successful\",\"data\":{\"userId\":\"user-123\",\"username\":\"newuser\",\"role\":\"DISPATCHER\"}}";
+                    }
                     exchange.getResponseHeaders().set("Content-Type", "application/json");
                     exchange.sendResponseHeaders(method.equalsIgnoreCase("POST") ? 201 : 200, resp.getBytes(StandardCharsets.UTF_8).length);
                     try (OutputStream os = exchange.getResponseBody()) {
@@ -103,6 +111,72 @@ class GatewayAuthRoutingIntegrationTest {
         };
 
         mockUserService.createContext("/users", usersHandler);
+
+        HttpHandler driversHandler = new HttpHandler() {
+            @Override
+            public void handle(HttpExchange exchange) throws IOException {
+                String authHeader = exchange.getRequestHeaders().getFirst("Authorization");
+                String method = exchange.getRequestMethod();
+                String path = exchange.getRequestURI().getPath();
+                boolean isDriverAuth = authHeader != null && authHeader.startsWith("Bearer mock-driver-token");
+                boolean isAdminAuth = authHeader != null && authHeader.startsWith("Bearer mock-admin-token");
+
+                if (path.contains("/availability")) {
+                    if (!isDriverAuth && !isAdminAuth) {
+                        String error = "{\"success\":false,\"message\":\"Access denied\",\"data\":null}";
+                        exchange.getResponseHeaders().set("Content-Type", "application/json");
+                        exchange.sendResponseHeaders(403, error.getBytes(StandardCharsets.UTF_8).length);
+                        try (OutputStream os = exchange.getResponseBody()) {
+                            os.write(error.getBytes(StandardCharsets.UTF_8));
+                        }
+                        return;
+                    }
+                    String resp = "{\"success\":true,\"message\":\"Driver availability updated successfully\",\"data\":{\"driverId\":\"driver-prof-1\",\"availability\":\"AVAILABLE\"}}";
+                    exchange.getResponseHeaders().set("Content-Type", "application/json");
+                    exchange.sendResponseHeaders(200, resp.getBytes(StandardCharsets.UTF_8).length);
+                    try (OutputStream os = exchange.getResponseBody()) {
+                        os.write(resp.getBytes(StandardCharsets.UTF_8));
+                    }
+                    return;
+                }
+
+                if (path.contains("/eligibility")) {
+                    if (!isDriverAuth && !isAdminAuth) {
+                        String error = "{\"success\":false,\"message\":\"Access denied\",\"data\":null}";
+                        exchange.getResponseHeaders().set("Content-Type", "application/json");
+                        exchange.sendResponseHeaders(403, error.getBytes(StandardCharsets.UTF_8).length);
+                        try (OutputStream os = exchange.getResponseBody()) {
+                            os.write(error.getBytes(StandardCharsets.UTF_8));
+                        }
+                        return;
+                    }
+                    String resp = "{\"success\":true,\"message\":\"Driver eligibility evaluated successfully\",\"data\":{\"driverId\":\"driver-prof-1\",\"eligible\":true}}";
+                    exchange.getResponseHeaders().set("Content-Type", "application/json");
+                    exchange.sendResponseHeaders(200, resp.getBytes(StandardCharsets.UTF_8).length);
+                    try (OutputStream os = exchange.getResponseBody()) {
+                        os.write(resp.getBytes(StandardCharsets.UTF_8));
+                    }
+                    return;
+                }
+
+                if (!isAdminAuth) {
+                    String error = "{\"success\":false,\"message\":\"Access denied: Administrator privileges required\",\"data\":null}";
+                    exchange.getResponseHeaders().set("Content-Type", "application/json");
+                    exchange.sendResponseHeaders(403, error.getBytes(StandardCharsets.UTF_8).length);
+                    try (OutputStream os = exchange.getResponseBody()) {
+                        os.write(error.getBytes(StandardCharsets.UTF_8));
+                    }
+                } else {
+                    String resp = "{\"success\":true,\"message\":\"Driver operation successful\",\"data\":{\"id\":\"driver-prof-1\",\"fullName\":\"Test Driver\"}}";
+                    exchange.getResponseHeaders().set("Content-Type", "application/json");
+                    exchange.sendResponseHeaders(method.equalsIgnoreCase("POST") ? 201 : 200, resp.getBytes(StandardCharsets.UTF_8).length);
+                    try (OutputStream os = exchange.getResponseBody()) {
+                        os.write(resp.getBytes(StandardCharsets.UTF_8));
+                    }
+                }
+            }
+        };
+        mockUserService.createContext("/drivers", driversHandler);
 
         mockUserService.start();
         System.setProperty("USER_SERVICE_URL", "http://localhost:" + mockPort);
@@ -253,5 +327,101 @@ class GatewayAuthRoutingIntegrationTest {
                 .statusCode(403)
                 .body("success", equalTo(false))
                 .body("message", containsString("Administrator privileges required"));
+    }
+
+    @Test
+    @DisplayName("Gateway successfully routes GET /api/users/roles with StripPrefix to backend user service")
+    void gatewayRoutesApiUsersRolesSuccessfully() {
+        RestAssured.given()
+                .header("Authorization", "Bearer mock-admin-token")
+                .when()
+                .get("/api/users/roles")
+                .then()
+                .statusCode(200)
+                .contentType(ContentType.JSON)
+                .body("success", equalTo(true))
+                .body("data.size()", equalTo(4));
+    }
+
+    @Test
+    @DisplayName("Gateway successfully routes PATCH /api/users/{id}/role with StripPrefix to backend user service")
+    void gatewayRoutesApiUsersUpdateRoleSuccessfully() {
+        String payload = "{\"role\":\"DRIVER\"}";
+
+        RestAssured.given()
+                .header("Authorization", "Bearer mock-admin-token")
+                .contentType(ContentType.JSON)
+                .body(payload)
+                .when()
+                .patch("/api/users/user-123/role")
+                .then()
+                .statusCode(200)
+                .contentType(ContentType.JSON)
+                .body("success", equalTo(true))
+                .body("data.role", equalTo("DRIVER"));
+    }
+
+    @Test
+    @DisplayName("Gateway successfully routes GET /api/drivers with StripPrefix to backend user service")
+    void gatewayRoutesApiDriversListSuccessfully() {
+        RestAssured.given()
+                .header("Authorization", "Bearer mock-admin-token")
+                .when()
+                .get("/api/drivers")
+                .then()
+                .statusCode(200)
+                .contentType(ContentType.JSON)
+                .body("success", equalTo(true))
+                .body("data.id", equalTo("driver-prof-1"));
+    }
+
+    @Test
+    @DisplayName("Gateway successfully routes POST /api/drivers with StripPrefix to backend user service")
+    void gatewayRoutesApiDriversCreateSuccessfully() {
+        String payload = "{\"userId\":\"usr-1\",\"fullName\":\"Test Driver\",\"phoneNumber\":\"0988776655\",\"licenseNumber\":\"GPLX-1\",\"licenseClass\":\"C\",\"vehicleType\":\"TRUCK\",\"vehiclePlate\":\"29C-12345\"}";
+
+        RestAssured.given()
+                .header("Authorization", "Bearer mock-admin-token")
+                .contentType(ContentType.JSON)
+                .body(payload)
+                .when()
+                .post("/api/drivers")
+                .then()
+                .statusCode(201)
+                .contentType(ContentType.JSON)
+                .body("success", equalTo(true))
+                .body("data.id", equalTo("driver-prof-1"));
+    }
+
+    @Test
+    @DisplayName("Gateway successfully routes PATCH /api/drivers/me/availability with StripPrefix to backend user service")
+    void gatewayRoutesApiDriverAvailabilitySuccessfully() {
+        String payload = "{\"availability\":\"AVAILABLE\"}";
+
+        RestAssured.given()
+                .header("Authorization", "Bearer mock-driver-token")
+                .contentType(ContentType.JSON)
+                .body(payload)
+                .when()
+                .patch("/api/drivers/me/availability")
+                .then()
+                .statusCode(200)
+                .contentType(ContentType.JSON)
+                .body("success", equalTo(true))
+                .body("data.availability", equalTo("AVAILABLE"));
+    }
+
+    @Test
+    @DisplayName("Gateway successfully routes GET /api/drivers/me/eligibility with StripPrefix to backend user service")
+    void gatewayRoutesApiDriverEligibilitySuccessfully() {
+        RestAssured.given()
+                .header("Authorization", "Bearer mock-driver-token")
+                .when()
+                .get("/api/drivers/me/eligibility")
+                .then()
+                .statusCode(200)
+                .contentType(ContentType.JSON)
+                .body("success", equalTo(true))
+                .body("data.eligible", equalTo(true));
     }
 }
