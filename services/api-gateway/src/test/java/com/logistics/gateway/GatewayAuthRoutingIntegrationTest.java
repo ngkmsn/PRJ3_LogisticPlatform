@@ -178,13 +178,46 @@ class GatewayAuthRoutingIntegrationTest {
         };
         mockUserService.createContext("/drivers", driversHandler);
 
+        HttpHandler ordersHandler = new HttpHandler() {
+            @Override
+            public void handle(HttpExchange exchange) throws IOException {
+                String authHeader = exchange.getRequestHeaders().getFirst("Authorization");
+                String method = exchange.getRequestMethod();
+                if (authHeader == null || !authHeader.startsWith("Bearer mock-customer-token")) {
+                    String error = "{\"success\":false,\"message\":\"Access denied: Only customers are permitted to access orders\",\"data\":null}";
+                    exchange.getResponseHeaders().set("Content-Type", "application/json");
+                    exchange.sendResponseHeaders(403, error.getBytes(StandardCharsets.UTF_8).length);
+                    try (OutputStream os = exchange.getResponseBody()) {
+                        os.write(error.getBytes(StandardCharsets.UTF_8));
+                    }
+                } else if (method.equalsIgnoreCase("GET")) {
+                    String resp = "{\"success\":true,\"message\":\"Orders retrieved successfully\",\"data\":{\"content\":[{\"id\":\"ord-123\",\"orderNumber\":\"ORD-001\",\"status\":\"PENDING\"}],\"totalElements\":1,\"page\":0,\"size\":10,\"totalPages\":1}}";
+                    exchange.getResponseHeaders().set("Content-Type", "application/json");
+                    exchange.sendResponseHeaders(200, resp.getBytes(StandardCharsets.UTF_8).length);
+                    try (OutputStream os = exchange.getResponseBody()) {
+                        os.write(resp.getBytes(StandardCharsets.UTF_8));
+                    }
+                } else {
+                    String resp = "{\"success\":true,\"message\":\"Order created successfully\",\"data\":{\"id\":\"ord-123\",\"orderNumber\":\"ORD-001\",\"status\":\"PENDING\"}}";
+                    exchange.getResponseHeaders().set("Content-Type", "application/json");
+                    exchange.sendResponseHeaders(201, resp.getBytes(StandardCharsets.UTF_8).length);
+                    try (OutputStream os = exchange.getResponseBody()) {
+                        os.write(resp.getBytes(StandardCharsets.UTF_8));
+                    }
+                }
+            }
+        };
+        mockUserService.createContext("/orders", ordersHandler);
+
         mockUserService.start();
         System.setProperty("USER_SERVICE_URL", "http://localhost:" + mockPort);
+        System.setProperty("ORDER_SERVICE_URL", "http://localhost:" + mockPort);
     }
 
     @AfterAll
     static void stopMockBackend() {
         System.clearProperty("USER_SERVICE_URL");
+        System.clearProperty("ORDER_SERVICE_URL");
         if (mockUserService != null) {
             mockUserService.stop(0);
         }
@@ -423,5 +456,39 @@ class GatewayAuthRoutingIntegrationTest {
                 .contentType(ContentType.JSON)
                 .body("success", equalTo(true))
                 .body("data.eligible", equalTo(true));
+    }
+
+    @Test
+    @DisplayName("Gateway successfully routes POST /api/orders with StripPrefix to backend order service")
+    void gatewayRoutesApiOrdersCreateSuccessfully() {
+        String payload = "{\"recipientName\":\"Test\",\"recipientPhone\":\"0900000000\",\"deliveryAddress\":\"Hanoi\",\"items\":[{\"productName\":\"Item\",\"quantity\":1,\"unitPrice\":10000}]}";
+
+        RestAssured.given()
+                .header("Authorization", "Bearer mock-customer-token")
+                .contentType(ContentType.JSON)
+                .body(payload)
+                .when()
+                .post("/api/orders")
+                .then()
+                .statusCode(201)
+                .contentType(ContentType.JSON)
+                .body("success", equalTo(true))
+                .body("data.status", equalTo("PENDING"));
+    }
+
+    @Test
+    @DisplayName("Gateway successfully routes GET /api/orders with StripPrefix and query params to backend order service")
+    void gatewayRoutesApiOrdersListSuccessfully() {
+        RestAssured.given()
+                .header("Authorization", "Bearer mock-customer-token")
+                .queryParam("page", 0)
+                .queryParam("size", 10)
+                .when()
+                .get("/api/orders")
+                .then()
+                .statusCode(200)
+                .contentType(ContentType.JSON)
+                .body("success", equalTo(true))
+                .body("data.content[0].orderNumber", equalTo("ORD-001"));
     }
 }

@@ -789,6 +789,167 @@ Tất cả các request đi qua API Gateway:
 
 ---
 
+## Order Management: Customer tạo Order (PB-016)
+
+Cho phép khách hàng (`CUSTOMER`) tạo mới một đơn hàng (`Order`) hợp lệ với trạng thái khởi tạo bắt buộc luôn là `PENDING`.
+
+### Order Creation APIs
+
+Tất cả request được gửi qua API Gateway:
+
+| Method | Endpoint (via Gateway) | Direct Endpoint | Required Privilege | Description |
+|---|---|---|---|---|
+| `POST` | `/api/orders` | `/orders` | `CUSTOMER` (hoặc `ORDER_CREATE`) | Khách hàng tạo mới một đơn hàng |
+
+**Request Body (`CreateOrderRequest`)**:
+```json
+{
+  "recipientName": "Nguyễn Văn B",
+  "recipientPhone": "0987654321",
+  "deliveryAddress": "123 Đường Nguyễn Trãi, Quận 1, TP. Hồ Chí Minh",
+  "notes": "Giao giờ hành chính, gọi trước khi đến",
+  "items": [
+    {
+      "productName": "Laptop Dell XPS",
+      "quantity": 1,
+      "unitPrice": 25000000.0
+    },
+    {
+      "productName": "Chuột không dây Logitech",
+      "quantity": 2,
+      "unitPrice": 450000.0
+    }
+  ]
+}
+```
+
+**Success Response (201 Created)**:
+```json
+{
+  "success": true,
+  "message": "Order created successfully",
+  "data": {
+    "id": "11111111-2222-3333-4444-555555555555",
+    "orderNumber": "ORD-20261009112500-1234",
+    "customerId": "00000000-0000-0000-0000-000000000004",
+    "recipientName": "Nguyễn Văn B",
+    "recipientPhone": "0987654321",
+    "deliveryAddress": "123 Đường Nguyễn Trãi, Quận 1, TP. Hồ Chí Minh",
+    "status": "PENDING",
+    "totalAmount": 25900000.0,
+    "notes": "Giao giờ hành chính, gọi trước khi đến",
+    "items": [
+      {
+        "id": "22222222-3333-4444-5555-666666666666",
+        "productName": "Laptop Dell XPS",
+        "quantity": 1,
+        "unitPrice": 25000000.0,
+        "totalPrice": 25000000.0
+      },
+      {
+        "id": "33333333-4444-5555-6666-777777777777",
+        "productName": "Chuột không dây Logitech",
+        "quantity": 2,
+        "unitPrice": 450000.0,
+        "totalPrice": 900000.0
+      }
+    ],
+    "createdAt": "2026-10-09T11:25:00.123Z",
+    "updatedAt": "2026-10-09T11:25:00.123Z"
+  }
+}
+```
+
+### Business Rules & Constraints
+1. **Trạng thái ban đầu**: Bắt buộc luôn là `PENDING`. Không thể tạo đơn với trạng thái khác qua API này (được đảm bảo bằng cả `@PrePersist` và domain logic).
+2. **Identity từ Token**: Định danh khách hàng (`customerId`) được trích xuất trực tiếp từ JWT token (`AuthPrincipal.getUserId()`). Request không nhận `customerId` tùy ý nhằm ngăn chặn hành vi tạo đơn mạo danh khách hàng khác.
+3. **Phân quyền truy cập (RBAC)**: Chỉ người dùng có role `CUSTOMER` (hoặc quyền `ORDER_CREATE`) mới được phép tạo order. Các vai trò khác (`DRIVER`, `DISPATCHER`...) bị từ chối với `403 Forbidden`. Request không token hoặc token lỗi trả về `401 Unauthorized`.
+4. **Validation dữ liệu đầu vào**:
+   - `recipientName`, `recipientPhone`, `deliveryAddress`: Bắt buộc không để trống.
+   - `items`: Bắt buộc phải có ít nhất 1 sản phẩm.
+   - Mỗi item: `productName` bắt buộc; `quantity >= 1`; `unitPrice > 0`.
+   - Nếu vi phạm validation -> trả về `400 Bad Request` kèm chi tiết lỗi.
+5. **Tính toán tổng tiền tự động**: `totalPrice` của từng item và `totalAmount` của toàn bộ đơn hàng được backend tự động tính toán chính xác từ `quantity * unitPrice`, tránh client gian lận giá tiền.
+6. **Lưu trữ bền vững**: Sử dụng bảng `orders` và `order_items` trong database `order_db` thông qua Liquibase migration (`002-add-order-details-and-items.yaml`).
+
+### Giới hạn & Giả định hiện tại
+- **Phạm vi biên giới**: Chỉ triển khai tạo Order ban đầu (PB-016). Chưa có API xem danh sách order, xem chi tiết order hay hủy order (thuộc các PB tiếp theo).
+- **Thanh toán & Kho hàng**: Chưa tích hợp kiểm tra tồn kho (inventory check) hay cổng thanh toán (payment gateway). Đơn hàng tạo ra ghi nhận số tiền và trạng thái `PENDING` sẵn sàng cho quy trình xử lý kế tiếp.
+
+---
+
+## Order Management: Customer xem danh sách Order (PB-017)
+
+Xây dựng tính năng cho phép khách hàng (`CUSTOMER`) truy xuất danh sách các đơn hàng của riêng mình với tính năng phân trang, bộ lọc trạng thái và đảm bảo bảo mật phân tách dữ liệu tuyệt đối (data isolation).
+
+### Order Listing APIs
+
+Tất cả request được gửi qua API Gateway:
+
+| Method | Endpoint (via Gateway) | Direct Endpoint | Required Privilege | Query Parameters | Description |
+|---|---|---|---|---|---|
+| `GET` | `/api/orders` | `/orders` | `CUSTOMER` (hoặc `ORDER_READ`) | `page` (default 0), `size` (default 10), `status` (optional) | Khách hàng xem danh sách đơn hàng của chính mình |
+
+**Success Response (200 OK)**:
+```json
+{
+  "success": true,
+  "message": "Orders retrieved successfully",
+  "data": {
+    "content": [
+      {
+        "id": "11111111-2222-3333-4444-555555555555",
+        "orderNumber": "ORD-20261009112500-1234",
+        "customerId": "00000000-0000-0000-0000-000000000004",
+        "recipientName": "Nguyễn Văn B",
+        "recipientPhone": "0987654321",
+        "deliveryAddress": "123 Đường Nguyễn Trãi, Quận 1, TP. Hồ Chí Minh",
+        "status": "PENDING",
+        "totalAmount": 25900000.0,
+        "notes": "Giao giờ hành chính, gọi trước khi đến",
+        "items": [
+          {
+            "id": "22222222-3333-4444-5555-666666666666",
+            "productName": "Laptop Dell XPS",
+            "quantity": 1,
+            "unitPrice": 25000000.0,
+            "totalPrice": 25000000.0
+          }
+        ],
+        "createdAt": "2026-10-09T11:25:00.123Z",
+        "updatedAt": "2026-10-09T11:25:00.123Z"
+      }
+    ],
+    "page": 0,
+    "size": 10,
+    "totalElements": 1,
+    "totalPages": 1
+  }
+}
+```
+
+### Business Rules & Constraints
+1. **Phân tách dữ liệu tuyệt đối (Data Isolation)**:
+   - `customerId` được trích xuất hoàn toàn từ JWT Claims của `Authorization: Bearer <token>`.
+   - Endpoint không nhận bất kỳ tham số `customerId` nào từ query param hay path param. Truy vấn SQL/HQL luôn bắt buộc điều kiện `WHERE customerId = :customerId`.
+   - Khách hàng chỉ nhìn thấy đơn hàng của chính mình, tuyệt đối không thể thấy hoặc biết đến đơn hàng của khách hàng khác.
+2. **Phân quyền truy cập (RBAC)**:
+   - Chỉ tài khoản có vai trò `CUSTOMER` mới có quyền xem danh sách order của cá nhân.
+   - Các vai trò khác (`DRIVER`, `ADMIN`, `DISPATCHER`) bị từ chối với `403 Forbidden` ("Access denied: Only customers are permitted to view orders").
+   - Truy cập không có token hoặc token không hợp lệ bị từ chối với `401 Unauthorized`.
+3. **Phân trang và sắp xếp (Pagination & Sorting)**:
+   - Hỗ trợ tham số phân trang: `page` (0-indexed, default 0), `size` (default 10, giới hạn tối đa 100).
+   - Thứ tự hiển thị mặc định: `createdAt DESC` (đơn hàng mới nhất lên đầu).
+4. **Bộ lọc trạng thái (`status`)**:
+   - Tùy chọn lọc theo trạng thái đơn hàng (`PENDING`, `CONFIRMED`, `IN_TRANSIT`, `DELIVERED`, `CANCELLED`).
+   - Nếu truyền giá trị status không tồn tại trong hệ thống -> từ chối với `400 Bad Request` ("Invalid order status: <value>").
+
+### Giới hạn & Giả định hiện tại
+- **Phạm vi biên giới**: Chỉ triển khai xem danh sách Order của chính Customer (PB-017). Không thực hiện xem chi tiết đơn hàng đơn lẻ bằng Order ID, không cập nhật hay hủy đơn hàng (sẽ triển khai ở PB-018+).
+- **Admin/Dispatcher View**: Đây là API tự phục vụ (self-service) của khách hàng. Giao diện quản trị của Admin/Dispatcher xem toàn bộ đơn hệ thống sẽ được xây dựng ở các task sau.
+
+---
+
 ## Roadmap
 
 | PB Item | Scope | Status |
@@ -808,7 +969,11 @@ Tất cả các request đi qua API Gateway:
 | **PB-013** | Driver Management: Quản lý Driver profile, liên kết 1-1 với User DRIVER, RBAC bảo vệ | ✅ Completed |
 | **PB-014** | Driver Management: Driver cập nhật availability (`AVAILABLE` ↔ `UNAVAILABLE`), persistence & RBAC | ✅ Completed |
 | **PB-015** | Driver Management: Định nghĩa eligibility của Driver, policy tập trung, reason codes & fail-safe | ✅ Completed |
-| **PB-016+** | Dispatching engine: Order assignment, shipment tracking, real-time events | ⏳ Planned |
+| **PB-016** | Order Management: Customer tạo Order (`POST /api/orders`), validation, `PENDING` status, RBAC | ✅ Completed |
+| **PB-017** | Order Management: Customer xem danh sách Order (`GET /api/orders`), phân trang, lọc status, data isolation | ✅ Completed |
+| **PB-018+** | Order & Dispatching lifecycle: Xem chi tiết đơn, hủy đơn, điều phối tài xế | ⏳ Planned |
+
+
 
 
 
