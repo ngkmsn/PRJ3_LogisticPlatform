@@ -55,6 +55,9 @@ public class Order {
     @OneToMany(mappedBy = "order", cascade = CascadeType.ALL, orphanRemoval = true, fetch = FetchType.EAGER)
     private List<OrderItem> items = new ArrayList<>();
 
+    @OneToMany(mappedBy = "order", cascade = CascadeType.ALL, orphanRemoval = true, fetch = FetchType.LAZY)
+    private List<OrderStatusHistory> history = new ArrayList<>();
+
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;
 
@@ -107,6 +110,13 @@ public class Order {
         if (item != null) {
             this.items.add(item);
             item.setOrder(this);
+        }
+    }
+
+    public void addHistory(OrderStatusHistory historyEntry) {
+        if (historyEntry != null) {
+            this.history.add(historyEntry);
+            historyEntry.setOrder(this);
         }
     }
 
@@ -190,6 +200,14 @@ public class Order {
 
     public void setItems(List<OrderItem> items) {
         this.items = items != null ? items : new ArrayList<>();
+    }
+
+    public List<OrderStatusHistory> getHistory() {
+        return history;
+    }
+
+    public void setHistory(List<OrderStatusHistory> history) {
+        this.history = history != null ? history : new ArrayList<>();
     }
 
     public Instant getCreatedAt() {

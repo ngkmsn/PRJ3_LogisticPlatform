@@ -4,6 +4,7 @@ import com.logistics.common.model.OrderStatus;
 import com.logistics.common.security.AuthPrincipal;
 import com.logistics.common.security.JwtTokenProvider;
 import com.logistics.common.security.Role;
+import com.logistics.order.dto.CancelOrderRequest;
 import com.logistics.order.dto.CreateOrderItemRequest;
 import com.logistics.order.dto.CreateOrderRequest;
 import com.logistics.order.dto.OrderDto;
@@ -11,7 +12,14 @@ import com.logistics.order.entity.Order;
 import com.logistics.order.entity.OrderItem;
 import com.logistics.order.exception.AccessDeniedException;
 import com.logistics.order.exception.BadCredentialsException;
+import com.logistics.order.dto.OrderStatusHistoryDto;
+import com.logistics.order.dto.UpdateOrderStatusRequest;
+import com.logistics.order.entity.OrderStatusHistory;
+import com.logistics.order.exception.OrderCancellationException;
+import com.logistics.order.exception.OrderNotFoundException;
+import com.logistics.order.lifecycle.OrderLifecycleValidator;
 import com.logistics.order.repository.OrderRepository;
+import com.logistics.order.repository.OrderStatusHistoryRepository;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.transaction.Transactional;
@@ -25,6 +33,11 @@ import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.UUID;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.logistics.order.dto.OrderCreatedEventPayload;
+import com.logistics.order.entity.OutboxEvent;
+import com.logistics.order.repository.OutboxEventRepository;
+
 @ApplicationScoped
 public class OrderService {
 
@@ -32,16 +45,79 @@ public class OrderService {
     private static final DateTimeFormatter DATE_FORMATTER = DateTimeFormatter.ofPattern("yyyyMMddHHmmss").withZone(ZoneOffset.UTC);
 
     private final OrderRepository orderRepository;
+    private final OrderStatusHistoryRepository statusHistoryRepository;
+    private final OutboxEventRepository outboxEventRepository;
     private final JwtTokenProvider jwtTokenProvider;
+    private final OrderLifecycleValidator lifecycleValidator;
+    private final ObjectMapper objectMapper;
+
+    public OrderService(OrderRepository orderRepository, JwtTokenProvider jwtTokenProvider) {
+        this(orderRepository, null, null, jwtTokenProvider, new OrderLifecycleValidator(), new ObjectMapper().findAndRegisterModules());
+    }
+
+    public OrderService(OrderRepository orderRepository,
+                        JwtTokenProvider jwtTokenProvider,
+                        OrderLifecycleValidator lifecycleValidator) {
+        this(orderRepository, null, null, jwtTokenProvider, lifecycleValidator, new ObjectMapper().findAndRegisterModules());
+    }
+
+    public OrderService(OrderRepository orderRepository,
+                        OrderStatusHistoryRepository statusHistoryRepository,
+                        JwtTokenProvider jwtTokenProvider,
+                        OrderLifecycleValidator lifecycleValidator) {
+        this(orderRepository, statusHistoryRepository, null, jwtTokenProvider, lifecycleValidator, new ObjectMapper().findAndRegisterModules());
+    }
+
+    public OrderService(OrderRepository orderRepository,
+                        OrderStatusHistoryRepository statusHistoryRepository,
+                        OutboxEventRepository outboxEventRepository,
+                        JwtTokenProvider jwtTokenProvider,
+                        OrderLifecycleValidator lifecycleValidator) {
+        this(orderRepository, statusHistoryRepository, outboxEventRepository, jwtTokenProvider, lifecycleValidator, new ObjectMapper().findAndRegisterModules());
+    }
 
     @Inject
-    public OrderService(OrderRepository orderRepository, JwtTokenProvider jwtTokenProvider) {
+    public OrderService(OrderRepository orderRepository,
+                        OrderStatusHistoryRepository statusHistoryRepository,
+                        OutboxEventRepository outboxEventRepository,
+                        JwtTokenProvider jwtTokenProvider,
+                        OrderLifecycleValidator lifecycleValidator,
+                        ObjectMapper objectMapper) {
         this.orderRepository = orderRepository;
+        this.statusHistoryRepository = statusHistoryRepository;
+        this.outboxEventRepository = outboxEventRepository;
         this.jwtTokenProvider = jwtTokenProvider;
+        this.lifecycleValidator = lifecycleValidator != null ? lifecycleValidator : new OrderLifecycleValidator();
+        this.objectMapper = objectMapper != null ? objectMapper : new ObjectMapper().findAndRegisterModules();
     }
 
     public AuthPrincipal resolveAuthenticatedCustomer(String authHeader) {
         return resolveAuthenticatedCustomer(authHeader, "create orders");
+    }
+
+    public AuthPrincipal resolveAuthenticatedStaffOrAdmin(String authHeader, String action) {
+        if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+            log.warn("Authentication failed: missing or invalid Authorization header");
+            throw new BadCredentialsException("Missing or invalid Authorization header");
+        }
+
+        String token = authHeader.substring(7).trim();
+        if (!jwtTokenProvider.validateToken(token)) {
+            log.warn("Authentication failed: token is invalid or expired");
+            throw new BadCredentialsException("Token is invalid or expired");
+        }
+
+        AuthPrincipal principal = AuthPrincipal.fromJwtToken(token, jwtTokenProvider);
+        if (principal == null) {
+            throw new BadCredentialsException("Token identity could not be verified");
+        }
+
+        if (principal.getRole() != Role.ADMIN && principal.getRole() != Role.DISPATCHER) {
+            log.warn("Access denied: caller role '{}' is not ADMIN or DISPATCHER for {}", principal.getRole(), action);
+            throw new AccessDeniedException("Access denied: Only administrators and dispatchers are permitted to " + action);
+        }
+
+        return principal;
     }
 
     public AuthPrincipal resolveAuthenticatedCustomer(String authHeader, String action) {
@@ -103,6 +179,32 @@ public class OrderService {
         return com.logistics.order.dto.PagedResponse.of(dtos, pageIndex, pageSize, totalElements);
     }
 
+    public OrderDto getOrderDetails(String authHeader, String orderIdentifier) {
+        AuthPrincipal customer = resolveAuthenticatedCustomer(authHeader, "view order details");
+
+        if (orderIdentifier == null || orderIdentifier.isBlank()) {
+            throw new IllegalArgumentException("Order identifier cannot be empty");
+        }
+
+        Order order = orderRepository.findByIdOrOrderNumber(orderIdentifier.trim())
+                .orElseThrow(() -> {
+                    log.warn("Order not found with identifier '{}'", orderIdentifier);
+                    return new OrderNotFoundException("Order not found with identifier: " + orderIdentifier);
+                });
+
+        // Strict ownership check: Must belong to the authenticated customer
+        if (!customer.getUserId().equals(order.getCustomerId())) {
+            log.warn("Access denied: Customer '{}' attempted to access order '{}' belonging to customer '{}'",
+                    customer.getUserId(), order.getId(), order.getCustomerId());
+            throw new AccessDeniedException("Access denied: You do not have permission to view this order");
+        }
+
+        log.info("Customer '{}' successfully retrieved order details for orderId='{}', orderNumber='{}'",
+                customer.getUserId(), order.getId(), order.getOrderNumber());
+
+        return OrderDto.from(order);
+    }
+
     @Transactional
     public OrderDto createOrder(String authHeader, CreateOrderRequest request) {
         AuthPrincipal customer = resolveAuthenticatedCustomer(authHeader);
@@ -157,11 +259,219 @@ public class OrderService {
         order.setTotalAmount(totalAmount);
 
         orderRepository.persist(order);
+        recordStatusHistory(order, null, OrderStatus.PENDING, customer.getUserId(), "CUSTOMER", "Đơn hàng được khởi tạo thành công");
+        recordOrderCreatedOutboxEvent(order);
 
         log.info("Order created successfully: orderId='{}', orderNumber='{}', customerId='{}', itemsCount={}, totalAmount={}",
                 order.getId(), order.getOrderNumber(), order.getCustomerId(), order.getItems().size(), order.getTotalAmount());
 
         return OrderDto.from(order);
+    }
+
+    @Transactional
+    public OrderDto cancelOrder(String authHeader, String orderIdentifier, CancelOrderRequest request) {
+        AuthPrincipal customer = resolveAuthenticatedCustomer(authHeader, "cancel orders");
+
+        if (orderIdentifier == null || orderIdentifier.isBlank()) {
+            throw new IllegalArgumentException("Order identifier cannot be empty");
+        }
+
+        Order order = orderRepository.findByIdOrOrderNumber(orderIdentifier.trim())
+                .orElseThrow(() -> {
+                    log.warn("Order not found with identifier '{}'", orderIdentifier);
+                    return new OrderNotFoundException("Order not found with identifier: " + orderIdentifier);
+                });
+
+        // Strict ownership check: Must belong to the authenticated customer
+        if (!customer.getUserId().equals(order.getCustomerId())) {
+            log.warn("Access denied: Customer '{}' attempted to cancel order '{}' belonging to customer '{}'",
+                    customer.getUserId(), order.getId(), order.getCustomerId());
+            throw new AccessDeniedException("Access denied: You do not have permission to cancel this order");
+        }
+
+        // Business rule check: Can only cancel order if it is in PENDING status
+        if (order.getStatus() == OrderStatus.CANCELLED) {
+            log.warn("Cancellation rejected: Order '{}' is already cancelled", order.getId());
+            throw new OrderCancellationException("Order is already cancelled");
+        }
+
+        if (order.getStatus() != OrderStatus.PENDING) {
+            log.warn("Cancellation rejected: Order '{}' in status '{}' cannot be cancelled",
+                    order.getId(), order.getStatus());
+            throw new OrderCancellationException("Order cannot be cancelled in status: " + order.getStatus() +
+                    ". Only orders in PENDING status can be cancelled.");
+        }
+
+        // Validate lifecycle transition using the state machine
+        lifecycleValidator.validateTransition(order.getStatus(), OrderStatus.CANCELLED);
+
+        order.setStatus(OrderStatus.CANCELLED);
+        order.setUpdatedAt(Instant.now());
+
+        String cancelReason = (request != null && request.getReason() != null && !request.getReason().isBlank())
+                ? request.getReason().trim()
+                : "Khách hàng yêu cầu hủy đơn";
+
+        String cancelNote = "[Cancelled: " + cancelReason + "]";
+        if (order.getNotes() == null || order.getNotes().isBlank()) {
+            order.setNotes(cancelNote);
+        } else {
+            order.setNotes(order.getNotes() + " " + cancelNote);
+        }
+
+        orderRepository.persist(order);
+        recordStatusHistory(order, OrderStatus.PENDING, OrderStatus.CANCELLED, customer.getUserId(), "CUSTOMER", cancelReason);
+
+        log.info("Order cancelled successfully: orderId='{}', orderNumber='{}', customerId='{}'",
+                order.getId(), order.getOrderNumber(), customer.getUserId());
+
+        return OrderDto.from(order);
+    }
+
+    @Transactional
+    public OrderDto updateOrderStatus(String authHeader, String orderIdentifier, UpdateOrderStatusRequest request) {
+        AuthPrincipal staff = resolveAuthenticatedStaffOrAdmin(authHeader, "update order status");
+
+        if (orderIdentifier == null || orderIdentifier.isBlank()) {
+            throw new IllegalArgumentException("Order identifier cannot be empty");
+        }
+
+        if (request == null || request.getStatus() == null) {
+            throw new IllegalArgumentException("Target order status is required");
+        }
+
+        Order order = orderRepository.findByIdOrOrderNumber(orderIdentifier.trim())
+                .orElseThrow(() -> {
+                    log.warn("Order not found with identifier '{}'", orderIdentifier);
+                    return new OrderNotFoundException("Order not found with identifier: " + orderIdentifier);
+                });
+
+        OrderStatus currentStatus = order.getStatus();
+        OrderStatus targetStatus = request.getStatus();
+
+        // Validate state transition using the dedicated lifecycle state machine
+        lifecycleValidator.validateTransition(currentStatus, targetStatus);
+
+        order.setStatus(targetStatus);
+        order.setUpdatedAt(Instant.now());
+
+        String updateReason = (request.getReason() != null && !request.getReason().isBlank())
+                ? request.getReason().trim()
+                : "Cập nhật trạng thái vòng đời";
+
+        String note = String.format("[Status: %s -> %s: %s]",
+                currentStatus, targetStatus, updateReason);
+        if (order.getNotes() == null || order.getNotes().isBlank()) {
+            order.setNotes(note);
+        } else {
+            order.setNotes(order.getNotes() + " " + note);
+        }
+
+        orderRepository.persist(order);
+        recordStatusHistory(order, currentStatus, targetStatus, staff.getUserId(), staff.getRole().name(), updateReason);
+
+        log.info("Order status transitioned successfully: orderId='{}', orderNumber='{}', from='{}', to='{}', by='{}' ({})",
+                order.getId(), order.getOrderNumber(), currentStatus, targetStatus, staff.getUserId(), staff.getRole());
+
+        return OrderDto.from(order);
+    }
+
+    public List<OrderStatusHistoryDto> getOrderHistory(String authHeader, String orderIdentifier) {
+        if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+            log.warn("Authentication failed: missing or invalid Authorization header");
+            throw new BadCredentialsException("Missing or invalid Authorization header");
+        }
+
+        String token = authHeader.substring(7).trim();
+        if (!jwtTokenProvider.validateToken(token)) {
+            log.warn("Authentication failed: token is invalid or expired");
+            throw new BadCredentialsException("Token is invalid or expired");
+        }
+
+        AuthPrincipal principal = AuthPrincipal.fromJwtToken(token, jwtTokenProvider);
+        if (principal == null) {
+            throw new BadCredentialsException("Token identity could not be verified");
+        }
+
+        if (orderIdentifier == null || orderIdentifier.isBlank()) {
+            throw new IllegalArgumentException("Order identifier cannot be empty");
+        }
+
+        Order order = orderRepository.findByIdOrOrderNumber(orderIdentifier.trim())
+                .orElseThrow(() -> {
+                    log.warn("Order not found with identifier '{}'", orderIdentifier);
+                    return new OrderNotFoundException("Order not found with identifier: " + orderIdentifier);
+                });
+
+        // Strict ownership check for CUSTOMER
+        if (principal.getRole() == Role.CUSTOMER && !principal.getUserId().equals(order.getCustomerId())) {
+            log.warn("Access denied: Customer '{}' attempted to view history of order '{}' belonging to customer '{}'",
+                    principal.getUserId(), order.getId(), order.getCustomerId());
+            throw new AccessDeniedException("Access denied: You do not have permission to view history for this order");
+        }
+
+        List<OrderStatusHistory> histories;
+        if (statusHistoryRepository != null) {
+            histories = statusHistoryRepository.findByOrderId(order.getId());
+        } else {
+            histories = order.getHistory();
+        }
+
+        log.info("Retrieved {} history entries for order '{}' by user '{}' ({})",
+                histories.size(), order.getId(), principal.getUserId(), principal.getRole());
+
+        return histories.stream()
+                .map(OrderStatusHistoryDto::from)
+                .toList();
+    }
+
+    private OrderStatusHistory recordStatusHistory(Order order, OrderStatus previousStatus, OrderStatus newStatus,
+                                                   String changedBy, String changedByRole, String reason) {
+        OrderStatusHistory historyEntry = new OrderStatusHistory(
+                UUID.randomUUID().toString(),
+                order,
+                order.getOrderNumber(),
+                previousStatus,
+                newStatus,
+                changedBy,
+                changedByRole,
+                reason,
+                Instant.now()
+        );
+        order.addHistory(historyEntry);
+        if (statusHistoryRepository != null) {
+            statusHistoryRepository.persist(historyEntry);
+        }
+        return historyEntry;
+    }
+
+    private void recordOrderCreatedOutboxEvent(Order order) {
+        if (outboxEventRepository == null) {
+            return;
+        }
+        try {
+            OrderCreatedEventPayload payloadObj = OrderCreatedEventPayload.from(order);
+            String payloadJson = objectMapper != null
+                    ? objectMapper.writeValueAsString(payloadObj)
+                    : "{}";
+
+            OutboxEvent outboxEvent = new OutboxEvent(
+                    "ORDER",
+                    order.getId(),
+                    "ORDER_CREATED",
+                    payloadJson
+            );
+
+            outboxEventRepository.persist(outboxEvent);
+            log.info("Recorded ORDER_CREATED outbox event: eventId='{}', orderId='{}', eventType='{}'",
+                    outboxEvent.getId(), order.getId(), outboxEvent.getEventType());
+        } catch (Exception e) {
+            log.error("Failed to record ORDER_CREATED outbox event for orderId='{}'", order.getId(), e);
+            if (e instanceof RuntimeException re) {
+                throw re;
+            }
+            throw new IllegalStateException("Failed to record ORDER_CREATED outbox event: " + e.getMessage(), e);
+        }
     }
 
     private String generateOrderNumber() {

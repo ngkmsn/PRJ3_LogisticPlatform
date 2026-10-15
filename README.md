@@ -950,6 +950,432 @@ Tất cả request được gửi qua API Gateway:
 
 ---
 
+## Order Management: Customer xem chi tiết Order (PB-018)
+
+Cung cấp API cho phép khách hàng (`CUSTOMER`) tra cứu thông tin chi tiết, danh sách sản phẩm và trạng thái hiện tại của một đơn hàng cụ thể, bảo đảm xác thực quyền sở hữu nghiêm ngặt (strict ownership verification).
+
+### Order Details APIs
+
+Tất cả request được gửi qua API Gateway:
+
+| Method | Endpoint (via Gateway) | Direct Endpoint | Required Privilege | Path Parameter | Description |
+|---|---|---|---|---|---|
+| `GET` | `/api/orders/{id}` | `/orders/{id}` | `CUSTOMER` (hoặc `ORDER_READ`) | `id`: Order ID (UUID) hoặc `orderNumber` | Khách hàng xem chi tiết đơn hàng của chính mình |
+
+**Success Response (200 OK)**:
+```json
+{
+  "success": true,
+  "message": "Order details retrieved successfully",
+  "data": {
+    "id": "11111111-2222-3333-4444-555555555555",
+    "orderNumber": "ORD-20261009112500-1234",
+    "customerId": "00000000-0000-0000-0000-000000000004",
+    "recipientName": "Nguyễn Văn B",
+    "recipientPhone": "0987654321",
+    "deliveryAddress": "123 Đường Nguyễn Trãi, Quận 1, TP. Hồ Chí Minh",
+    "status": "PENDING",
+    "totalAmount": 25900000.0,
+    "notes": "Giao giờ hành chính, gọi trước khi đến",
+    "items": [
+      {
+        "id": "22222222-3333-4444-5555-666666666666",
+        "productName": "Laptop Dell XPS",
+        "quantity": 1,
+        "unitPrice": 25000000.0,
+        "totalPrice": 25000000.0
+      }
+    ],
+    "createdAt": "2026-10-09T11:25:00.123Z",
+    "updatedAt": "2026-10-09T11:25:00.123Z"
+  }
+}
+```
+
+### Business Rules & Constraints
+1. **Kiểm tra quyền sở hữu nghiêm ngặt (Strict Ownership Verification)**:
+   - Hệ thống so sánh `order.customerId` với `userId` được trích xuất từ JWT token của người gọi.
+   - Nếu đơn hàng thuộc về khách hàng khác, hệ thống ngay lập tức từ chối với mã lỗi `403 Forbidden` ("Access denied: You do not have permission to view this order"). Tuyệt đối không để lộ dữ liệu cho người ngoài.
+2. **Xử lý đơn hàng không tồn tại**:
+   - Nếu không tìm thấy Order theo `id` hoặc `orderNumber`, hệ thống trả về mã lỗi `404 Not Found` ("Order not found with identifier: <id>").
+3. **Phân quyền vai trò (RBAC)**:
+   - Chỉ tài khoản có vai trò `CUSTOMER` mới có quyền tra cứu chi tiết đơn hàng qua API này.
+   - Các vai trò khác (`DRIVER`, `ADMIN`, `DISPATCHER`) bị từ chối với `403 Forbidden` ("Access denied: Only customers are permitted to view order details").
+   - Yêu cầu không có token hoặc token hỏng bị từ chối với `401 Unauthorized`.
+4. **Hỗ trợ đa định danh tra cứu**:
+   - Khách hàng có thể truyền UUID nội bộ (`id`) hoặc mã hiển thị thân thiện (`orderNumber` định dạng `ORD-...`).
+
+---
+
+## Order Management: Customer hủy Order (PB-019)
+
+Cung cấp API cho phép khách hàng (`CUSTOMER`) thực hiện hủy đơn hàng do chính họ sở hữu khi đơn hàng đang ở trạng thái hợp lệ (`PENDING`), bảo đảm xác thực quyền sở hữu nghiêm ngặt và kiểm soát vòng đời trạng thái nhất quán.
+
+### Order Cancellation APIs
+
+Tất cả request được gửi qua API Gateway:
+
+| Method | Endpoint (via Gateway) | Direct Endpoint | Required Privilege | Path Parameter | Request Body | Description |
+|---|---|---|---|---|---|---|
+| `POST` / `PUT` | `/api/orders/{id}/cancel` | `/orders/{id}/cancel` | `CUSTOMER` (hoặc `ORDER_CANCEL`) | `id`: Order ID (UUID) hoặc `orderNumber` | `CancelOrderRequest` (optional) | Khách hàng hủy đơn hàng của chính mình |
+
+**Request Body (`CancelOrderRequest` - optional)**:
+```json
+{
+  "reason": "Đặt nhầm địa chỉ giao hàng, muốn đặt lại"
+}
+```
+> *Lưu ý*: Request body là tùy chọn (optional). Khách hàng có thể gửi request rỗng (no body) hoặc kèm lý do hủy.
+
+**Success Response (200 OK)**:
+```json
+{
+  "success": true,
+  "message": "Order cancelled successfully",
+  "data": {
+    "id": "11111111-2222-3333-4444-555555555555",
+    "orderNumber": "ORD-20261009112500-1234",
+    "customerId": "00000000-0000-0000-0000-000000000004",
+    "recipientName": "Nguyễn Văn B",
+    "recipientPhone": "0987654321",
+    "deliveryAddress": "123 Đường Nguyễn Trãi, Quận 1, TP. Hồ Chí Minh",
+    "status": "CANCELLED",
+    "totalAmount": 25900000.0,
+    "notes": "Giao giờ hành chính, gọi trước khi đến [Cancelled: Đặt nhầm địa chỉ giao hàng, muốn đặt lại]",
+    "items": [
+      {
+        "id": "22222222-3333-4444-5555-666666666666",
+        "productName": "Laptop Dell XPS",
+        "quantity": 1,
+        "unitPrice": 25000000.0,
+        "totalPrice": 25000000.0
+      }
+    ],
+    "createdAt": "2026-10-09T11:25:00.123Z",
+    "updatedAt": "2026-10-15T15:20:00.456Z"
+  }
+}
+```
+
+### Business Rules & Constraints
+1. **Kiểm tra quyền sở hữu nghiêm ngặt (Strict Ownership Verification)**:
+   - Hệ thống so sánh `order.customerId` với `userId` trích xuất từ JWT token của người gọi.
+   - Nếu đơn hàng thuộc về khách hàng khác, hệ thống ngay lập tức từ chối với mã lỗi `403 Forbidden` ("Access denied: You do not have permission to cancel this order").
+2. **Kiểm tra trạng thái cho phép hủy (Order Lifecycle Status Check)**:
+   - Khách hàng chỉ được phép hủy đơn hàng khi đơn đang ở trạng thái `PENDING`.
+   - Nếu đơn hàng đã ở trạng thái `CANCELLED`: từ chối với `400 Bad Request` ("Order is already cancelled").
+   - Nếu đơn hàng đã qua trạng thái xử lý/vận chuyển (`CONFIRMED`, `ASSIGNED`, `IN_TRANSIT`, `DELIVERED`): từ chối với `400 Bad Request` ("Order cannot be cancelled in status: <status>. Only orders in PENDING status can be cancelled.").
+3. **Xử lý đơn hàng không tồn tại**:
+   - Nếu không tìm thấy Order theo `id` hoặc `orderNumber`, hệ thống trả về mã lỗi `404 Not Found` ("Order not found with identifier: <id>").
+4. **Phân quyền vai trò (RBAC)**:
+   - Chỉ tài khoản có vai trò `CUSTOMER` mới có quyền thực hiện thao tác hủy đơn qua API này.
+   - Các vai trò khác (`DRIVER`, `ADMIN`, `DISPATCHER`) bị từ chối với `403 Forbidden` ("Access denied: Only customers are permitted to cancel orders").
+   - Yêu cầu không có token hoặc token không hợp lệ bị từ chối với `401 Unauthorized`.
+5. **Cập nhật dữ liệu an toàn & đồng bộ**:
+   - Thao tác thực hiện trong một Database Transaction (`@Transactional`).
+   - Cập nhật `status = CANCELLED`, đồng thời cập nhật timestamp `updatedAt = Instant.now()`.
+   - Nếu client cung cấp lý do hủy (`reason`), nội dung này được ghi nhận bổ sung vào trường `notes` của đơn hàng.
+
+### Giới hạn & Giả định hiện tại
+- **Phạm vi biên giới**: Chỉ triển khai nghiệp vụ hủy Order từ phía Customer (PB-019).
+- **Thanh toán & Kho**: Không tự động kích hoạt quy trình hoàn tiền tự động (auto-refund) hay điều chỉnh tồn kho phức tạp ngoài phạm vi task.
+
+---
+
+## Order Management: Quản lý Order Lifecycle (PB-020)
+
+Cung cấp cơ chế kiểm soát vòng đời trạng thái (`Order Lifecycle State Machine`) một cách nghiêm ngặt, đảm bảo mọi chuyển dịch trạng thái đơn hàng đều tuân thủ luồng nghiệp vụ hợp lệ và ngăn chặn triệt để các bước nhảy trạng thái trái phép.
+
+### Biểu đồ trạng thái Vòng đời Đơn hàng (State Machine Diagram)
+
+```mermaid
+stateDiagram-v2
+    [*] --> PENDING: Customer tạo đơn (PB-016)
+    
+    PENDING --> CONFIRMED: Xác nhận đơn hàng (Admin/Dispatcher)
+    PENDING --> CANCELLED: Hủy đơn hàng (Customer PB-019 / System)
+    
+    CONFIRMED --> ASSIGNED: Điều phối & gán tài xế
+    CONFIRMED --> CANCELLED: Hủy đơn hàng
+    
+    ASSIGNED --> IN_TRANSIT: Tài xế lấy hàng & bắt đầu giao
+    ASSIGNED --> CONFIRMED: Hủy gán / Re-dispatch
+    ASSIGNED --> CANCELLED: Hủy đơn hàng
+    
+    IN_TRANSIT --> DELIVERED: Giao hàng thành công (Terminal)
+    IN_TRANSIT --> CANCELLED: Sự cố bất khả kháng / Hủy đơn (Terminal)
+    
+    DELIVERED --> [*]
+    CANCELLED --> [*]
+```
+
+### Ma trận chuyển dịch trạng thái hợp lệ (Allowed State Transitions)
+
+| Trạng thái hiện tại (`from`) | Trạng thái tiếp theo cho phép (`to`) | Mô tả nghiệp vụ |
+|---|---|---|
+| **`PENDING`** | `CONFIRMED`, `CANCELLED` | Đơn mới tạo chỉ có thể được xác nhận hoặc hủy. |
+| **`CONFIRMED`** | `ASSIGNED`, `CANCELLED` | Đơn đã xác nhận có thể điều phối tài xế hoặc hủy. |
+| **`ASSIGNED`** | `IN_TRANSIT`, `CONFIRMED`, `CANCELLED` | Đơn đã gán có thể bắt đầu giao, hủy gán (re-dispatch) hoặc hủy. |
+| **`IN_TRANSIT`** | `DELIVERED`, `CANCELLED` | Đơn đang giao có thể hoàn tất thành công hoặc hủy khi gặp sự cố. |
+| **`DELIVERED`** | *Không có (Terminal)* | Đã giao hàng thành công, không thể chuyển sang trạng thái khác. |
+| **`CANCELLED`** | *Không có (Terminal)* | Đã hủy đơn hàng, không thể chuyển sang trạng thái khác. |
+
+> **Quy tắc chuyển đổi cùng trạng thái**: Chuyển đổi sang chính trạng thái hiện tại (`from == to`) bị từ chối với lỗi `400 Bad Request` ("Order is already in status <status>").
+
+### Order Status Update APIs
+
+Tất cả request được gửi qua API Gateway:
+
+| Method | Endpoint (via Gateway) | Direct Endpoint | Required Privilege | Path Parameter | Request Body | Description |
+|---|---|---|---|---|---|---|
+| `PATCH` / `PUT` | `/api/orders/{id}/status` | `/orders/{id}/status` | `ADMIN` hoặc `DISPATCHER` (`ORDER_UPDATE`) | `id`: Order ID (UUID) hoặc `orderNumber` | `UpdateOrderStatusRequest` | Quản trị viên/Điều phối viên cập nhật trạng thái đơn hàng |
+
+**Request Body (`UpdateOrderStatusRequest`)**:
+```json
+{
+  "status": "CONFIRMED",
+  "reason": "Đã kiểm tra thông tin kho và chấp nhận đơn hàng"
+}
+```
+
+**Success Response (200 OK)**:
+```json
+{
+  "success": true,
+  "message": "Order status updated successfully",
+  "data": {
+    "id": "11111111-2222-3333-4444-555555555555",
+    "orderNumber": "ORD-20261009112500-1234",
+    "customerId": "00000000-0000-0000-0000-000000000004",
+    "recipientName": "Nguyễn Văn B",
+    "recipientPhone": "0987654321",
+    "deliveryAddress": "123 Đường Nguyễn Trãi, Quận 1, TP. Hồ Chí Minh",
+    "status": "CONFIRMED",
+    "totalAmount": 25900000.0,
+    "notes": "Giao giờ hành chính [Status: PENDING -> CONFIRMED: Đã kiểm tra thông tin kho và chấp nhận đơn hàng]",
+    "items": [
+      {
+        "id": "22222222-3333-4444-5555-666666666666",
+        "productName": "Laptop Dell XPS",
+        "quantity": 1,
+        "unitPrice": 25000000.0,
+        "totalPrice": 25000000.0
+      }
+    ],
+    "createdAt": "2026-10-09T11:25:00.123Z",
+    "updatedAt": "2026-10-15T15:35:00.123Z"
+  }
+}
+```
+
+### Business Rules & Constraints
+1. **Kiểm soát State Machine tập trung**:
+   - Component `OrderLifecycleValidator` chịu trách nhiệm duy nhất cho việc thẩm định tính hợp lệ của mọi yêu cầu chuyển dịch trạng thái.
+   - Nếu chuyển đổi không hợp lệ, hệ thống ném `InvalidStateTransitionException` và trả về `400 Bad Request` kèm thông điệp chi tiết giải thích rõ các trạng thái hợp lệ tiếp theo.
+2. **Ngăn chặn chuyển đổi từ trạng thái kết thúc (Terminal States)**:
+   - Các đơn hàng ở trạng thái `DELIVERED` hoặc `CANCELLED` là trạng thái kết thúc bất biến, bị chặn tuyệt đối mọi yêu cầu chuyển đổi tiếp theo.
+3. **Phân quyền truy cập (RBAC)**:
+   - Chỉ tài khoản có vai trò `ADMIN` hoặc `DISPATCHER` (sở hữu quyền `ORDER_UPDATE`) mới được phép cập nhật trạng thái đơn hàng qua API quản trị này.
+   - Các vai trò `CUSTOMER` và `DRIVER` bị từ chối với `403 Forbidden` ("Access denied: Only administrators and dispatchers are permitted to update order status").
+   - Yêu cầu không có token hoặc token không hợp lệ bị từ chối với `401 Unauthorized`.
+4. **Tích hợp đồng bộ**:
+   - API `cancelOrder` (PB-019) tích hợp trực tiếp kiểm tra từ `OrderLifecycleValidator` bên cạnh các quy tắc đặc thù của Customer.
+
+### Giới hạn & Giả định hiện tại
+- **Mở rộng vai trò tài xế**: Tài xế cập nhật trạng thái trong quá trình giao hàng sẽ được tích hợp cùng module Shipment & Dispatching.
+
+---
+
+## Order Management: Lưu Order Status History (PB-021)
+
+Xây dựng hệ thống lưu vết (`audit trail` / `status history`) cho mọi chuyển dịch trạng thái của đơn hàng, đảm bảo tính toàn vẹn và minh bạch nghiệp vụ từ khi tạo đơn đến khi hoàn tất hoặc hủy.
+
+### Cấu trúc Bảng Database (`order_status_history`)
+
+Bảng lưu trữ lịch sử được thiết kế liên kết trực tiếp với bảng `orders` qua quan hệ 1-N kèm ràng buộc khóa ngoại (Foreign Key with CASCADE DELETE) và lập chỉ mục tối ưu truy vấn:
+
+| Column Name | Data Type | Constraints | Description |
+|---|---|---|---|
+| `id` | `VARCHAR(36)` | `PRIMARY KEY` | Định danh UUID của bản ghi lịch sử |
+| `order_id` | `VARCHAR(36)` | `NOT NULL`, `FOREIGN KEY (orders.id) ON DELETE CASCADE` | Khóa ngoại trỏ đến bảng `orders` |
+| `order_number` | `VARCHAR(50)` | `NOT NULL` | Mã hiển thị đơn hàng (ví dụ: `ORD-20261015-ABCDEF`) |
+| `previous_status`| `VARCHAR(30)` | `NULLABLE` | Trạng thái trước khi thay đổi (`null` đối với lần tạo đơn ban đầu) |
+| `new_status` | `VARCHAR(30)` | `NOT NULL` | Trạng thái mới của đơn hàng |
+| `changed_by` | `VARCHAR(100)`| `NOT NULL` | UUID hoặc User ID của người/hệ thống thực hiện |
+| `changed_by_role`| `VARCHAR(50)` | `NULLABLE` | Vai trò thực hiện (`CUSTOMER`, `ADMIN`, `DISPATCHER`, `SYSTEM`, ...) |
+| `reason` | `VARCHAR(500)`| `NULLABLE` | Lý do thay đổi trạng thái hoặc ghi chú hủy |
+| `created_at` | `TIMESTAMP WITH TIME ZONE` | `NOT NULL` | Mốc thời gian ghi nhận thay đổi |
+
+- **Indexes**:
+  - `idx_order_status_history_order_id` trên `order_id` để tối ưu hóa tốc độ truy xuất toàn bộ lịch sử theo đơn hàng.
+  - `idx_order_status_history_created_at` trên `created_at` phục vụ sắp xếp thứ tự dòng thời gian (chronological order).
+
+### Cơ chế Ghi nhận Tự động & Transactional Consistency
+
+Bản ghi lịch sử trạng thái được tự động tạo và lưu trữ bên trong cùng ranh giới transaction (`@Transactional`) với thao tác thay đổi trạng thái của đơn hàng:
+1. **Khởi tạo đơn hàng (`createOrder` - PB-016)**:
+   - Tự động ghi bản ghi đầu tiên: `previous_status = null`, `new_status = PENDING`, `changed_by = customerId`, `changed_by_role = CUSTOMER`, `reason = "Order created"`.
+2. **Khách hàng hủy đơn (`cancelOrder` - PB-019)**:
+   - Tự động ghi bản ghi: `previous_status = PENDING`, `new_status = CANCELLED`, `changed_by = customerId`, `changed_by_role = CUSTOMER`, `reason = <cancel_reason>`.
+3. **Cập nhật vòng đời đơn hàng (`updateOrderStatus` - PB-020)**:
+   - Thẩm định luồng chuyển dịch hợp lệ qua `OrderLifecycleValidator`.
+   - Tự động ghi bản ghi: `previous_status = <old_status>`, `new_status = <new_status>`, `changed_by = actorId`, `changed_by_role = ADMIN/DISPATCHER`, `reason = <update_reason>`.
+4. **Tính nhất quán dữ liệu (Transactional Guarantee)**:
+   - Cả việc lưu thực thể `Order` và `OrderStatusHistory` đều được quản lý đồng thời trong cùng một Hibernate/JPA Panache transaction. Nếu việc ghi lịch sử gặp sự cố, toàn bộ thay đổi trạng thái của đơn hàng sẽ được rollback, ngăn chặn hoàn toàn hiện tượng lệch trạng thái (desync).
+
+### Order Status History Retrieval API
+
+Truy xuất danh sách dòng thời gian thay đổi trạng thái của một đơn hàng theo thứ tự thời gian tăng dần (`ASC`):
+
+| Method | Endpoint (via Gateway) | Direct Endpoint | Required Privilege | Path Parameter | Description |
+|---|---|---|---|---|---|
+| `GET` | `/api/orders/{id}/history` | `/orders/{id}/history` | `CUSTOMER` (sở hữu đơn), `ADMIN`, hoặc `DISPATCHER` | `id`: Order ID (UUID) hoặc `orderNumber` | Truy xuất toàn bộ lịch sử thay đổi trạng thái của đơn hàng |
+
+**Phân quyền truy cập (Access Control)**:
+- **`CUSTOMER`**: Chỉ được phép xem lịch sử của các đơn hàng do chính mình sở hữu. Nếu truy cập đơn của khách hàng khác sẽ nhận lỗi `403 Forbidden` ("Access denied: You do not have permission to view history for this order").
+- **`ADMIN` / `DISPATCHER`**: Được phép xem lịch sử của bất kỳ đơn hàng nào trong hệ thống.
+- **Unauthenticated**: Trả về `401 Unauthorized` nếu thiếu hoặc token không hợp lệ.
+- **Non-existent**: Trả về `404 Not Found` nếu order ID hoặc orderNumber không tồn tại.
+
+**Sample Response (`200 OK`)**:
+```json
+{
+  "success": true,
+  "message": "Order history retrieved successfully",
+  "data": [
+    {
+      "id": "c1f7a0b5-78e9-4e88-b210-9876543210ab",
+      "orderId": "11111111-2222-3333-4444-555555555555",
+      "orderNumber": "ORD-20261015-7D7405",
+      "previousStatus": null,
+      "newStatus": "PENDING",
+      "changedBy": "00000000-0000-0000-0000-000000000004",
+      "changedByRole": "CUSTOMER",
+      "reason": "Order created",
+      "createdAt": "2026-10-15T15:30:00.120Z"
+    },
+    {
+      "id": "e890abcd-1234-5678-90ab-cdef12345678",
+      "orderId": "11111111-2222-3333-4444-555555555555",
+      "orderNumber": "ORD-20261015-7D7405",
+      "previousStatus": "PENDING",
+      "newStatus": "CONFIRMED",
+      "changedBy": "admin-uuid-1",
+      "changedByRole": "ADMIN",
+      "reason": "Đã kiểm tra thông tin kho và duyệt đơn",
+      "createdAt": "2026-10-15T15:35:12.450Z"
+    },
+    {
+      "id": "f901bcde-2345-6789-01bc-def234567890",
+      "orderId": "11111111-2222-3333-4444-555555555555",
+      "orderNumber": "ORD-20261015-7D7405",
+      "previousStatus": "CONFIRMED",
+      "newStatus": "ASSIGNED",
+      "changedBy": "dispatcher-uuid-1",
+      "changedByRole": "DISPATCHER",
+      "reason": "Gán cho tài xế Nguyễn Văn Tài (TX-01)",
+      "createdAt": "2026-10-15T15:40:05.800Z"
+    }
+  ]
+}
+```
+
+### Giới hạn & Giả định hiện tại
+- **Giao diện người dùng (UI)**: Không tạo màn hình UI hiển thị lịch sử ở giai đoạn này; tập trung trọn vẹn vào audit trail backend logging và dữ liệu JSON API.
+- **Sửa đổi bản ghi lịch sử**: Dữ liệu lịch sử là `Append-Only` (bất biến), không cung cấp bất kỳ API cập nhật hoặc xóa lịch sử nào ngoài việc xóa theo cascade khi toàn bộ Order bị xóa.
+
+---
+
+## Order Management: Transactional Outbox Pattern cho OrderCreated (PB-022)
+
+Áp dụng mẫu thiết kế **Transactional Outbox Pattern** khi khách hàng tạo đơn hàng thành công, đảm bảo tính nhất quán tuyệt đối (Atomicity & ACID) giữa việc lưu dữ liệu nghiệp vụ (`Order`, `OrderItem`, `OrderStatusHistory`) và sự kiện miền (`ORDER_CREATED`).
+
+### Cấu trúc Bảng Database (`outbox_events`)
+
+Bảng lưu trữ sự kiện Outbox được khởi tạo qua Liquibase migration [004-create-outbox-events-table.yaml](file:///Users/ngkmsn/PRJ3/services/order-service/src/main/resources/db/changelog/changes/004-create-outbox-events-table.yaml):
+
+| Column Name | Data Type | Constraints | Description |
+|---|---|---|---|
+| `id` | `VARCHAR(36)` | `PRIMARY KEY` | Định danh UUID của sự kiện (`eventId`) |
+| `aggregate_type` | `VARCHAR(50)` | `NOT NULL` | Loại thực thể tập hợp (ví dụ: `ORDER`) |
+| `aggregate_id` | `VARCHAR(36)` | `NOT NULL` | ID của đơn hàng (`orderId`) |
+| `event_type` | `VARCHAR(100)`| `NOT NULL` | Loại sự kiện (ví dụ: `ORDER_CREATED`) |
+| `payload` | `CLOB` / `TEXT` | `NOT NULL` | Dữ liệu sự kiện chi tiết được tuần tự hóa dạng JSON (`OrderCreatedEventPayload`) |
+| `status` | `VARCHAR(30)` | `NOT NULL, DEFAULT 'PENDING'` | Trạng thái phát tán (`PENDING`, `PUBLISHED`, `FAILED`) |
+| `retry_count` | `INT` | `NOT NULL, DEFAULT 0` | Số lần thử lại khi xuất bản ra Message Broker (Kafka) |
+| `error_message` | `VARCHAR(500)`| `NULLABLE` | Ghi nhận nguyên nhân lỗi nếu việc phát tán thất bại |
+| `occurred_at` | `TIMESTAMP WITH TIME ZONE` | `NOT NULL` | Thời điểm phát sinh sự kiện |
+| `published_at`| `TIMESTAMP WITH TIME ZONE` | `NULLABLE` | Thời điểm sự kiện được phát tán thành công sang Kafka |
+| `created_at` | `TIMESTAMP WITH TIME ZONE` | `NOT NULL` | Mốc thời gian tạo bản ghi |
+
+- **Indexes**:
+  - `idx_outbox_events_status` trên `status` để worker polling các sự kiện `PENDING` có hiệu năng cao nhất.
+  - `idx_outbox_events_aggregate_id` trên `aggregate_id` để truy xuất nhanh lịch sử sự kiện theo đơn hàng.
+  - `idx_outbox_events_occurred_at` trên `occurred_at` để bảo đảm thứ tự phát tán tuần tự theo thời gian.
+
+### Cơ chế Đảm bảo Atomicity & Transaction Rollback
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Customer
+    participant API as OrderController
+    participant Svc as OrderService
+    participant DB as PostgreSQL (order_db)
+
+    Customer->>API: POST /api/orders (Create Order)
+    API->>Svc: createOrder(request)
+    Note over Svc,DB: Bắt đầu Database Transaction (@Transactional)
+    Svc->>DB: 1. Persist Order & OrderItems
+    Svc->>DB: 2. Persist OrderStatusHistory (PENDING)
+    Svc->>DB: 3. Persist OutboxEvent (ORDER_CREATED, PENDING)
+    
+    alt Thành công toàn bộ
+        Note over Svc,DB: COMMIT Transaction
+        DB-->>Svc: Commit thành công
+        Svc-->>API: Trả về OrderDto (201 Created)
+        API-->>Customer: 201 Created
+    else Ghi Outbox thất bại (hoặc lỗi DB)
+        Note over Svc,DB: ROLLBACK Transaction
+        DB-->>Svc: Rollback hoàn toàn
+        Note over DB: Không có Order hay Event nào được lưu!
+        Svc-->>API: Throw Exception
+        API-->>Customer: 500 Internal Server Error
+    end
+```
+
+- **Quy tắc ACID nghiêm ngặt**:
+  1. Thao tác lưu `Order`, `OrderStatusHistory`, và `OutboxEvent` được thực thi trong cùng một Narayana JTA boundary (`@Transactional`).
+  2. Bất kỳ lỗi nào xảy ra trong quá trình tuần tự hóa payload JSON hoặc `outboxEventRepository.persist(...)` sẽ lập tức ném runtime exception làm kích hoạt **Transaction Rollback**.
+  3. Tuyệt đối **không xảy ra tình trạng phân mảnh** (Order đã commit trong database nhưng event không được lưu).
+
+### Cấu trúc Payload của Sự kiện (`OrderCreatedEventPayload`)
+```json
+{
+  "orderId": "a160802e-8c07-4590-8e02-0fbbe4c23695",
+  "orderNumber": "ORD-20261015-7D7405",
+  "customerId": "aaaa1111-1111-1111-1111-aaaaaaaaaaaa",
+  "recipientName": "Nguyễn Văn Nhận",
+  "recipientPhone": "0988776655",
+  "deliveryAddress": "123 Hoàng Hoa Thám, Ba Đình, Hà Nội",
+  "status": "PENDING",
+  "totalAmount": 500000.00,
+  "notes": "Giao giờ hành chính",
+  "items": [
+    {
+      "id": "22222222-3333-4444-5555-666666666666",
+      "productName": "Kiện hàng A",
+      "quantity": 2,
+      "unitPrice": 150000.00,
+      "totalPrice": 300000.00
+    }
+  ],
+  "createdAt": "2026-10-15T15:30:00.120Z"
+}
+```
+
+---
+
 ## Roadmap
 
 | PB Item | Scope | Status |
@@ -971,7 +1397,15 @@ Tất cả request được gửi qua API Gateway:
 | **PB-015** | Driver Management: Định nghĩa eligibility của Driver, policy tập trung, reason codes & fail-safe | ✅ Completed |
 | **PB-016** | Order Management: Customer tạo Order (`POST /api/orders`), validation, `PENDING` status, RBAC | ✅ Completed |
 | **PB-017** | Order Management: Customer xem danh sách Order (`GET /api/orders`), phân trang, lọc status, data isolation | ✅ Completed |
-| **PB-018+** | Order & Dispatching lifecycle: Xem chi tiết đơn, hủy đơn, điều phối tài xế | ⏳ Planned |
+| **PB-018** | Order Management: Customer xem chi tiết Order (`GET /api/orders/{id}`), kiểm tra ownership, 403/404 handling | ✅ Completed |
+| **PB-019** | Order Management: Customer hủy Order (`POST /api/orders/{id}/cancel`), kiểm tra ownership & PENDING status | ✅ Completed |
+| **PB-020** | Order Management: Quản lý Order Lifecycle State Machine (`PATCH /api/orders/{id}/status`), validation & RBAC | ✅ Completed |
+| **PB-021** | Order Management: Lưu Order status history (Audit trail), tự động ghi nhận & API truy xuất history | ✅ Completed |
+| **PB-022** | Order Management: Tạo Outbox event cho OrderCreated (`outbox_events`), transactional consistency & rollback test | ✅ Completed |
+| **PB-023+** | Dispatching & Shipment: Phân công chuyến hàng, tracking lộ trình thời gian thực | ⏳ Planned |
+
+
+
 
 
 

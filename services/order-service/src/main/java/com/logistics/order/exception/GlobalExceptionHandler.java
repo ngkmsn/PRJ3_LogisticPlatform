@@ -69,4 +69,40 @@ public class GlobalExceptionHandler {
                     .build();
         }
     }
+
+    @Provider
+    public static class OrderNotFoundMapper implements ExceptionMapper<OrderNotFoundException> {
+        @Override
+        public Response toResponse(OrderNotFoundException exception) {
+            log.warn("Order not found: {}", exception.getMessage());
+            return Response.status(Response.Status.NOT_FOUND)
+                    .type(MediaType.APPLICATION_JSON)
+                    .entity(ApiResponse.error(exception.getMessage()))
+                    .build();
+        }
+    }
+
+    @Provider
+    public static class OrderCancellationMapper implements ExceptionMapper<OrderCancellationException> {
+        @Override
+        public Response toResponse(OrderCancellationException exception) {
+            log.warn("Order cancellation rejected: {}", exception.getMessage());
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .type(MediaType.APPLICATION_JSON)
+                    .entity(ApiResponse.error(exception.getMessage()))
+                    .build();
+        }
+    }
+
+    @Provider
+    public static class InvalidStateTransitionMapper implements ExceptionMapper<InvalidStateTransitionException> {
+        @Override
+        public Response toResponse(InvalidStateTransitionException exception) {
+            log.warn("Invalid order state transition: {}", exception.getMessage());
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .type(MediaType.APPLICATION_JSON)
+                    .entity(ApiResponse.error(exception.getMessage()))
+                    .build();
+        }
+    }
 }

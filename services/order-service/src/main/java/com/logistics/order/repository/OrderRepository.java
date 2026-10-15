@@ -13,6 +13,10 @@ public class OrderRepository implements PanacheRepositoryBase<Order, String> {
         return find("orderNumber", orderNumber).firstResultOptional();
     }
 
+    public Optional<Order> findByIdOrOrderNumber(String identifier) {
+        return find("id = ?1 or orderNumber = ?1", identifier).firstResultOptional();
+    }
+
     public boolean existsByOrderNumber(String orderNumber) {
         return count("orderNumber", orderNumber) > 0;
     }

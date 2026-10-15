@@ -3,3 +3,8 @@ databaseChangeLog:
       file: db/changelog/changes/001-create-orders-table.yaml
   - include:
       file: db/changelog/changes/002-add-order-details-and-items.yaml
+  - include:
+      file: db/changelog/changes/003-create-order-status-history-table.yaml
+  - include:
+      file: db/changelog/changes/004-create-outbox-events-table.yaml
+

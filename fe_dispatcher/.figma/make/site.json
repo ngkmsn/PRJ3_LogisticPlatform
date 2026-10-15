@@ -1,0 +1,10 @@
+{
+  "description": "Streamlines logistics operations by enabling dispatchers to monitor orders, manage driver assignments, handle exceptions, and optimize delivery workflows efficiently.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}

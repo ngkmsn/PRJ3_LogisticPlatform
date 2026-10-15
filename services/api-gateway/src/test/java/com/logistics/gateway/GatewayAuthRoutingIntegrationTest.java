@@ -191,7 +191,14 @@ class GatewayAuthRoutingIntegrationTest {
                         os.write(error.getBytes(StandardCharsets.UTF_8));
                     }
                 } else if (method.equalsIgnoreCase("GET")) {
-                    String resp = "{\"success\":true,\"message\":\"Orders retrieved successfully\",\"data\":{\"content\":[{\"id\":\"ord-123\",\"orderNumber\":\"ORD-001\",\"status\":\"PENDING\"}],\"totalElements\":1,\"page\":0,\"size\":10,\"totalPages\":1}}";
+                    String reqPath = exchange.getRequestURI().getPath();
+                    String resp;
+                    if (reqPath.startsWith("/orders/") && reqPath.length() > "/orders/".length()) {
+                        String id = reqPath.substring("/orders/".length());
+                        resp = "{\"success\":true,\"message\":\"Order details retrieved successfully\",\"data\":{\"id\":\"" + id + "\",\"orderNumber\":\"ORD-001\",\"status\":\"PENDING\"}}";
+                    } else {
+                        resp = "{\"success\":true,\"message\":\"Orders retrieved successfully\",\"data\":{\"content\":[{\"id\":\"ord-123\",\"orderNumber\":\"ORD-001\",\"status\":\"PENDING\"}],\"totalElements\":1,\"page\":0,\"size\":10,\"totalPages\":1}}";
+                    }
                     exchange.getResponseHeaders().set("Content-Type", "application/json");
                     exchange.sendResponseHeaders(200, resp.getBytes(StandardCharsets.UTF_8).length);
                     try (OutputStream os = exchange.getResponseBody()) {
@@ -490,5 +497,19 @@ class GatewayAuthRoutingIntegrationTest {
                 .contentType(ContentType.JSON)
                 .body("success", equalTo(true))
                 .body("data.content[0].orderNumber", equalTo("ORD-001"));
+    }
+
+    @Test
+    @DisplayName("Gateway successfully routes GET /api/orders/{id} with StripPrefix to backend order service")
+    void gatewayRoutesApiOrdersGetByIdSuccessfully() {
+        RestAssured.given()
+                .header("Authorization", "Bearer mock-customer-token")
+                .when()
+                .get("/api/orders/ord-123")
+                .then()
+                .statusCode(200)
+                .contentType(ContentType.JSON)
+                .body("success", equalTo(true))
+                .body("data.id", equalTo("ord-123"));
     }
 }
