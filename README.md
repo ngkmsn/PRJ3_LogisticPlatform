@@ -1376,6 +1376,80 @@ sequenceDiagram
 
 ---
 
+## Order Management: Publish OrderCreated từ Outbox (PB-023)
+
+Xây dựng thành phần **Outbox Publisher** trong `Order Service` nhằm định kỳ quét và phát tán các sự kiện Outbox sang Kafka Message Broker theo chuẩn **At-Least-Once Delivery**, cam kết tính toàn vẹn và không thất thoát thông tin.
+
+### Nguyên lý Hoạt động & Đảm bảo Tính Tin cậy
+
+1. **Phân tách Ranh giới Transaction (Decoupled & Post-Commit)**:
+   - Quá trình publish chạy bất đồng bộ tách biệt hoàn toàn khỏi luồng tạo đơn hàng của Customer.
+   - Publisher chỉ truy vấn các bản ghi `outbox_events` có `status = 'PENDING'` đã được commit thành công vào database.
+2. **Xác nhận Ack từ Kafka (Synchronous Broker Acknowledgment)**:
+   - Sự kiện được gửi lên Kafka topic `logistics.order.events` (key là `orderId`, partition ordering per aggregate).
+   - Bản ghi Outbox **chỉ được đánh dấu `PUBLISHED`** và lưu mốc thời gian `published_at` khi và chỉ khi Kafka broker phản hồi `RecordMetadata` xác nhận đã ghi đĩa thành công.
+3. **Cơ chế Retry & Xử lý Lỗi (Fault-Tolerance)**:
+   - Nếu Kafka bị mất kết nối, timeout, hoặc broker từ chối ghi:
+     - Trạng thái bản ghi được giữ nguyên là `PENDING` (hoặc chuyển sang `FAILED` khi vượt quá `max-retries = 5`).
+     - Tăng số lần thử lại `retry_count += 1` và lưu nguyên nhân lỗi vào `error_message`.
+     - Tuyệt đối **không đánh dấu published** khi chưa gửi thành công. Sự kiện tiếp tục được lưu để retry trong chu kỳ quét kế tiếp.
+4. **An toàn Concurrency & Chống Trùng lặp (Atomic State Claiming)**:
+   - Khi có nhiều publisher node hoặc instance chạy song song, mỗi worker thực hiện **Atomic Claim** qua câu lệnh update trạng thái:
+     ```sql
+     UPDATE outbox_events SET status = 'PROCESSING' WHERE id = :id AND status = 'PENDING'
+     ```
+   - Chỉ worker nào cập nhật thành công (số dòng ảnh hưởng = 1) mới được quyền phát tán sự kiện. Các worker khác sẽ bỏ qua, loại bỏ nguy cơ race condition và publish trùng lặp không cần thiết.
+5. **Khôi phục Khi Service Restart (Stale & Crash Recovery)**:
+   - Khi service khởi động (`@Observes StartupEvent`), worker tự động rà soát và chuyển toàn bộ các sự kiện đang kẹt ở trạng thái `PROCESSING` do tiến trình cũ bị tắt đột ngột trở lại `PENDING`.
+   - Định kỳ, worker tự động giải phóng các sự kiện `PROCESSING` quá hạn (`stale-timeout-minutes = 5m`) để retry, cam kết không bao giờ thất lạc event.
+
+### Cấu hình Outbox Publisher (`application.properties`)
+
+```properties
+# Outbox Publisher Settings
+outbox.publisher.enabled=${OUTBOX_PUBLISHER_ENABLED:true}
+outbox.publisher.interval=${OUTBOX_PUBLISHER_INTERVAL:5s}
+outbox.publisher.batch-size=${OUTBOX_PUBLISHER_BATCH_SIZE:50}
+outbox.publisher.max-retries=${OUTBOX_PUBLISHER_MAX_RETRIES:5}
+outbox.publisher.stale-timeout-minutes=${OUTBOX_PUBLISHER_STALE_TIMEOUT_MINUTES:5}
+kafka.producer.timeout-seconds=${KAFKA_PRODUCER_TIMEOUT_SECONDS:5}
+```
+
+### Event Contract Phát tán lên Kafka (`DomainEvent<T>`)
+
+Message phát tán tuân thủ cấu trúc envelope chuẩn `DomainEvent` của hệ thống:
+```json
+{
+  "eventId": "ccc3bdc9-1d96-4096-a057-935ddc99d220",
+  "eventType": "ORDER_CREATED",
+  "aggregateId": "1f01f847-d1e1-4a67-bd3a-dbbc5c474d91",
+  "timestamp": "2026-10-15T17:34:10.904Z",
+  "payload": {
+    "orderId": "1f01f847-d1e1-4a67-bd3a-dbbc5c474d91",
+    "orderNumber": "ORD-20261015103410-188700",
+    "customerId": "cust-outbox-uuid-1",
+    "recipientName": "Phạm Minh Hoàng",
+    "recipientPhone": "0944556677",
+    "deliveryAddress": "Số 88 Cầu Giấy, Hà Nội",
+    "status": "PENDING",
+    "totalAmount": 5700000.0,
+    "notes": "Giao sau 17h",
+    "items": [
+      {
+        "id": "...",
+        "productName": "Màn hình máy tính",
+        "quantity": 1,
+        "unitPrice": 4500000.0,
+        "totalPrice": 4500000.0
+      }
+    ],
+    "createdAt": "2026-10-15T17:34:10.904Z"
+  }
+}
+```
+
+---
+
 ## Roadmap
 
 | PB Item | Scope | Status |
@@ -1402,7 +1476,9 @@ sequenceDiagram
 | **PB-020** | Order Management: Quản lý Order Lifecycle State Machine (`PATCH /api/orders/{id}/status`), validation & RBAC | ✅ Completed |
 | **PB-021** | Order Management: Lưu Order status history (Audit trail), tự động ghi nhận & API truy xuất history | ✅ Completed |
 | **PB-022** | Order Management: Tạo Outbox event cho OrderCreated (`outbox_events`), transactional consistency & rollback test | ✅ Completed |
-| **PB-023+** | Dispatching & Shipment: Phân công chuyến hàng, tracking lộ trình thời gian thực | ⏳ Planned |
+| **PB-023** | Order Management: Publish OrderCreated từ Outbox sang Kafka, ACK verification, retry & concurrency control | ✅ Completed |
+| **PB-024+** | Dispatching & Shipment: Phân công chuyến hàng, tracking lộ trình thời gian thực | ⏳ Planned |
+
 
 
 

@@ -19,7 +19,7 @@ databaseChangeLog:
                     nullable: false
               - column:
                   name: aggregate_id
-                  type: VARCHAR(36)
+                  type: VARCHAR(100)
                   constraints:
                     nullable: false
               - column:
