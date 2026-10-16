@@ -1,0 +1,57 @@
+databaseChangeLog:
+  - changeSet:
+      id: 003-create-inbox-events-table
+      author: logistics-team
+      changes:
+        - createTable:
+            tableName: inbox_events
+            columns:
+              - column:
+                  name: id
+                  type: VARCHAR(36)
+                  constraints:
+                    primaryKey: true
+                    nullable: false
+              - column:
+                  name: event_id
+                  type: VARCHAR(100)
+                  constraints:
+                    nullable: false
+                    unique: true
+              - column:
+                  name: event_type
+                  type: VARCHAR(50)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: aggregate_id
+                  type: VARCHAR(100)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: status
+                  type: VARCHAR(30)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: processed_at
+                  type: TIMESTAMP
+                  constraints:
+                    nullable: false
+              - column:
+                  name: created_at
+                  type: TIMESTAMP
+                  constraints:
+                    nullable: false
+        - createIndex:
+            indexName: idx_inbox_events_event_id
+            tableName: inbox_events
+            columns:
+              - column:
+                  name: event_id
+        - createIndex:
+            indexName: idx_inbox_events_aggregate_id
+            tableName: inbox_events
+            columns:
+              - column:
+                  name: aggregate_id

@@ -1450,6 +1450,83 @@ Message phát tán tuân thủ cấu trúc envelope chuẩn `DomainEvent` của 
 
 ---
 
+## Dispatching & Assignment: Consumer Xử lý OrderCreated (PB-024)
+
+Triển khai Kafka Consumer lắng nghe sự kiện `ORDER_CREATED` tại **Assignment / Shipment Service**, phân tách ranh giới nghiệp vụ (service boundary), bảo toàn dữ liệu và khởi tạo luồng phân công đơn hàng (`assignments`).
+
+### 1. Kiến trúc Bounded Context & Cơ chế Tiêu thụ (Consumer Architecture)
+- **Tách rời Service Boundary**: Assignment Service (`shipment-service`) giao tiếp hoàn toàn qua Kafka message broker, **không truy cập trực tiếp database của `order-service`**.
+- **Topic**: `logistics.order.events` (`KafkaTopics.ORDER_EVENTS`).
+- **Channel**: SmallRye Reactive Messaging `@Incoming("order-events")` với chế độ xác nhận thủ công `@Acknowledgment(Acknowledgment.Strategy.MANUAL)` và `@Blocking` worker thread.
+- **Cam kết Acknowledgment & Offset Commit**:
+  - Chỉ gọi `message.ack()` sau khi dữ liệu đã deserialize, validate hợp lệ và persist thành công bản ghi Assignment vào database `shipment_db`.
+  - Khi payload không hợp lệ (`InvalidEventPayloadException`) hoặc gặp lỗi hệ thống/database: gọi `message.nack(throwable)` và ghi log chi tiết, **tuyệt đối không ACK** nhằm tránh mất mát sự kiện (Event Loss Prevention) và cho phép Kafka retry/redelivery theo đúng cơ chế.
+  - Xử lý mượt mà khi nhận các sự kiện khác trên cùng aggregate (ví dụ `ORDER_CANCELLED`), an toàn ACK để không làm nghẽn luồng xử lý của partition.
+
+### 2. Mô hình Dữ liệu Bảng `assignments` (`shipment_db`)
+Liquibase changeset `002-create-assignments-table.yaml`:
+| Cột | Kiểu | Ràng buộc | Mục đích |
+|---|---|---|---|
+| `id` | `VARCHAR(36)` | `PRIMARY KEY` | Mã định danh duy nhất của assignment (UUID) |
+| `order_id` | `VARCHAR(100)` | `NOT NULL`, `UNIQUE` | Khóa liên kết đơn hàng từ Order Service |
+| `order_number` | `VARCHAR(50)` | Nullable | Mã hiển thị đơn hàng (ví dụ: `ORD-20261016-...`) |
+| `customer_id` | `VARCHAR(100)` | `NOT NULL` | Khách hàng sở hữu đơn hàng |
+| `recipient_name`| `VARCHAR(100)` | Nullable | Tên người nhận hàng |
+| `recipient_phone`| `VARCHAR(20)` | Nullable | Số điện thoại người nhận hàng |
+| `delivery_address`| `VARCHAR(255)`| `NOT NULL` | Địa chỉ giao hàng cần điều phối |
+| `total_amount` | `NUMERIC(12, 2)` | Nullable | Giá trị đơn hàng |
+| `status` | `VARCHAR(30)` | `NOT NULL` | Trạng thái điều phối: `PENDING`, `SEARCHING_DRIVER`, `ASSIGNED`, `FAILED`, `CANCELLED` |
+| `driver_id` | `VARCHAR(100)` | Nullable | Tài xế được gán (khởi tạo `NULL`, sẵn sàng cho PB-026+) |
+| `notes` | `TEXT` | Nullable | Ghi chú giao hàng |
+| `created_at` | `TIMESTAMP` | `NOT NULL` | Thời điểm tiếp nhận yêu cầu phân công |
+| `updated_at` | `TIMESTAMP` | Nullable | Thời điểm cập nhật trạng thái phân công |
+
+Indexes:
+- `idx_assignments_order_id` trên `order_id`
+- `idx_assignments_status` trên `status`
+
+### 3. Nguyên lý Idempotency (Xử lý trùng lặp sự kiện)
+Theo ngữ nghĩa giao hàng At-Least-Once của Kafka:
+- Khi nhận trùng lặp sự kiện `ORDER_CREATED` cho cùng một `orderId`: `AssignmentService.initiateAssignment()` kiểm tra sự tồn tại trong DB qua `findByOrderId(orderId)`.
+- Nếu đã tồn tại: ghi log info, trả về đối tượng `Assignment` hiện có và xác nhận `message.ack()`, ngăn chặn triệt để lỗi xung đột ràng buộc Unique và không tạo nhiều lượt phân công trùng lặp.
+
+---
+
+## Dispatching & Assignment: Idempotent Consumer & Inbox Pattern (PB-025)
+
+Triển khai mẫu thiết kế **Inbox Pattern / Idempotent Consumer** tại **Assignment Service** (`shipment-service`) nhằm triệt tiêu hoàn toàn nguy cơ trùng lặp dữ liệu do cơ chế At-Least-Once Delivery của Kafka message broker.
+
+### 1. Kiến trúc Inbox Pattern & Xử lý Trùng lặp (Idempotent Architecture)
+- **Lưu vết xử lý (Inbox Table)**: Tạo bảng `inbox_events` trong database riêng `shipment_db` ghi nhận các `event_id` duy nhất từ message envelope của Kafka.
+- **Ranh giới giao dịch nguyên tử (Atomic Transaction)**:
+  - Cả thao tác tạo bản ghi phân công đơn hàng (`Assignment`) và ghi nhận `InboxEvent` (`status = PROCESSED`) đều được thực thi trong **cùng một database transaction** (`QuarkusTransaction.requiringNew()`).
+  - Đảm bảo tính nhất quán dữ liệu tuyệt đối: nếu nghiệp vụ tạo Assignment thất bại, bản ghi Inbox cũng bị rollback ngay lập tức.
+- **Kiểm tra trạng thái trước thực thi (Pre-execution Check)**:
+  - Trước khi thực hiện business logic, service kiểm tra `inboxEventRepository.isEventProcessed(eventId)`.
+  - Nếu đã xử lý: bỏ qua (skip execution), ghi log và lập tức xác nhận `message.ack()`, tránh lãng phí tài nguyên hệ thống.
+- **Xử lý tranh chấp đồng thời (Concurrent Race Condition Handling)**:
+  - Ràng buộc duy nhất tại tầng cơ sở dữ liệu (`UNIQUE CONSTRAINT` trên cột `event_id` của `inbox_events` và `order_id` của `assignments`).
+  - Khi 2 message trùng lặp đến đồng thời trên các consumer thread khác nhau, cơ sở dữ liệu sẽ chặn transaction thứ hai bằng lỗi vi phạm ràng buộc unique (`ConstraintViolationException`).
+  - `InboxEventService` bắt exception này, nhận diện race condition, lấy bản ghi `Assignment` đã được transaction trước commit thành công và trả về an toàn để consumer xác nhận `message.ack()` mà không văng lỗi unhandled.
+
+### 2. Mô hình Dữ liệu Bảng `inbox_events` (`shipment_db`)
+Liquibase changeset `003-create-inbox-events-table.yaml`:
+| Cột | Kiểu | Ràng buộc | Mục đích |
+|---|---|---|---|
+| `id` | `VARCHAR(36)` | `PRIMARY KEY` | Khóa chính bản ghi Inbox (UUID) |
+| `event_id` | `VARCHAR(100)` | `NOT NULL`, `UNIQUE` | Mã định danh duy nhất của sự kiện từ Kafka |
+| `event_type` | `VARCHAR(50)` | `NOT NULL` | Loại sự kiện (ví dụ: `ORDER_CREATED`) |
+| `aggregate_id` | `VARCHAR(100)` | `NOT NULL` | Khóa aggregate (ví dụ: `order_id`) |
+| `status` | `VARCHAR(30)` | `NOT NULL` | Trạng thái xử lý: `PROCESSED`, `FAILED` |
+| `processed_at` | `TIMESTAMP` | `NOT NULL` | Thời điểm hoàn tất xử lý sự kiện |
+| `created_at` | `TIMESTAMP` | `NOT NULL` | Thời điểm ghi nhận bản ghi |
+
+Indexes:
+- `idx_inbox_events_event_id` trên `event_id`
+- `idx_inbox_events_aggregate_id` trên `aggregate_id`
+
+---
+
 ## Roadmap
 
 | PB Item | Scope | Status |
@@ -1477,7 +1554,9 @@ Message phát tán tuân thủ cấu trúc envelope chuẩn `DomainEvent` của 
 | **PB-021** | Order Management: Lưu Order status history (Audit trail), tự động ghi nhận & API truy xuất history | ✅ Completed |
 | **PB-022** | Order Management: Tạo Outbox event cho OrderCreated (`outbox_events`), transactional consistency & rollback test | ✅ Completed |
 | **PB-023** | Order Management: Publish OrderCreated từ Outbox sang Kafka, ACK verification, retry & concurrency control | ✅ Completed |
-| **PB-024+** | Dispatching & Shipment: Phân công chuyến hàng, tracking lộ trình thời gian thực | ⏳ Planned |
+| **PB-024** | Dispatching & Assignment: Consumer xử lý OrderCreated tại Assignment Service, validation, ACK/NACK & idempotency | ✅ Completed |
+| **PB-025** | Dispatching & Assignment: Idempotent Consumer & Inbox Pattern (`inbox_events`), Atomic Tx & Race Condition resolution | ✅ Completed |
+| **PB-026+** | Dispatching & Driver Selection: Lọc driver khả dụng, tính toán khoảng cách & dispatching flow | ⏳ Planned |
 
 
 
