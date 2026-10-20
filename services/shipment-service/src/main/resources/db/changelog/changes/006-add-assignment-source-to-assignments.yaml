@@ -1,0 +1,15 @@
+databaseChangeLog:
+  - changeSet:
+      id: 006-add-assignment-source-to-assignments
+      author: logistics-team
+      changes:
+        - addColumn:
+            tableName: assignments
+            columns:
+              - column:
+                  name: assignment_source
+                  type: VARCHAR(30)
+                  defaultValue: "AUTO"
+              - column:
+                  name: assigned_by
+                  type: VARCHAR(100)

@@ -1,0 +1,105 @@
+package com.logistics.shipment.exception;
+
+import com.logistics.common.dto.ApiResponse;
+import jakarta.validation.ConstraintViolation;
+import jakarta.validation.ConstraintViolationException;
+import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.ext.ExceptionMapper;
+import jakarta.ws.rs.ext.Provider;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.stream.Collectors;
+
+public class GlobalExceptionHandler {
+
+    private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
+
+    @Provider
+    public static class BadCredentialsMapper implements ExceptionMapper<BadCredentialsException> {
+        @Override
+        public Response toResponse(BadCredentialsException exception) {
+            log.warn("Authentication failed: {}", exception.getMessage());
+            return Response.status(Response.Status.UNAUTHORIZED)
+                    .type(MediaType.APPLICATION_JSON)
+                    .entity(ApiResponse.error(exception.getMessage()))
+                    .build();
+        }
+    }
+
+    @Provider
+    public static class AccessDeniedMapper implements ExceptionMapper<AccessDeniedException> {
+        @Override
+        public Response toResponse(AccessDeniedException exception) {
+            log.warn("Access denied: {}", exception.getMessage());
+            return Response.status(Response.Status.FORBIDDEN)
+                    .type(MediaType.APPLICATION_JSON)
+                    .entity(ApiResponse.error(exception.getMessage()))
+                    .build();
+        }
+    }
+
+    @Provider
+    public static class AssignmentNotFoundMapper implements ExceptionMapper<AssignmentNotFoundException> {
+        @Override
+        public Response toResponse(AssignmentNotFoundException exception) {
+            log.warn("Assignment not found: {}", exception.getMessage());
+            return Response.status(Response.Status.NOT_FOUND)
+                    .type(MediaType.APPLICATION_JSON)
+                    .entity(ApiResponse.error(exception.getMessage()))
+                    .build();
+        }
+    }
+
+    @Provider
+    public static class DuplicateAssignmentMapper implements ExceptionMapper<DuplicateAssignmentException> {
+        @Override
+        public Response toResponse(DuplicateAssignmentException exception) {
+            log.warn("Duplicate assignment conflict: {}", exception.getMessage());
+            return Response.status(Response.Status.CONFLICT)
+                    .type(MediaType.APPLICATION_JSON)
+                    .entity(ApiResponse.error(exception.getMessage()))
+                    .build();
+        }
+    }
+
+    @Provider
+    public static class ValidationExceptionMapper implements ExceptionMapper<ConstraintViolationException> {
+        @Override
+        public Response toResponse(ConstraintViolationException exception) {
+            String message = exception.getConstraintViolations().stream()
+                    .map(ConstraintViolation::getMessage)
+                    .collect(Collectors.joining(", "));
+            log.warn("Validation failed: {}", message);
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .type(MediaType.APPLICATION_JSON)
+                    .entity(ApiResponse.error(message))
+                    .build();
+        }
+    }
+
+    @Provider
+    public static class IllegalArgumentExceptionMapper implements ExceptionMapper<IllegalArgumentException> {
+        @Override
+        public Response toResponse(IllegalArgumentException exception) {
+            log.warn("Illegal argument: {}", exception.getMessage());
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .type(MediaType.APPLICATION_JSON)
+                    .entity(ApiResponse.error(exception.getMessage()))
+                    .build();
+        }
+    }
+
+    @Provider
+    public static class IllegalStateExceptionMapper implements ExceptionMapper<IllegalStateException> {
+        @Override
+        public Response toResponse(IllegalStateException exception) {
+            log.warn("Illegal state: {}", exception.getMessage());
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .type(MediaType.APPLICATION_JSON)
+                    .entity(ApiResponse.error(exception.getMessage()))
+                    .build();
+        }
+    }
+}

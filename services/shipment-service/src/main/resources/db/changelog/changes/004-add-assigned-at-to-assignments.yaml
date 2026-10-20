@@ -1,0 +1,11 @@
+databaseChangeLog:
+  - changeSet:
+      id: 004-add-assigned-at-to-assignments
+      author: logistics-team
+      changes:
+        - addColumn:
+            tableName: assignments
+            columns:
+              - column:
+                  name: assigned_at
+                  type: TIMESTAMP

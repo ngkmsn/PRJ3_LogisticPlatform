@@ -56,6 +56,33 @@ public class Assignment extends PanacheEntityBase {
     @Column(name = "driver_id", length = 100)
     private String driverId;
 
+    @Column(name = "assigned_at")
+    private Instant assignedAt;
+
+    @Column(name = "unassigned_reason", length = 100)
+    private String unassignedReason;
+
+    @Column(name = "unassigned_at")
+    private Instant unassignedAt;
+
+    @Column(name = "assignment_source", length = 30)
+    private String assignmentSource;
+
+    @Column(name = "assigned_by", length = 100)
+    private String assignedBy;
+
+    @Column(name = "previous_driver_id", length = 100)
+    private String previousDriverId;
+
+    @Column(name = "reassign_reason", length = 255)
+    private String reassignReason;
+
+    @Column(name = "reassigned_at")
+    private Instant reassignedAt;
+
+    @Column(name = "reassigned_by", length = 100)
+    private String reassignedBy;
+
     @Column(name = "notes", columnDefinition = "TEXT")
     private String notes;
 
@@ -72,6 +99,15 @@ public class Assignment extends PanacheEntityBase {
                       String recipientName, String recipientPhone, String deliveryAddress,
                       BigDecimal totalAmount, AssignmentStatus status, String driverId,
                       String notes, Instant createdAt, Instant updatedAt) {
+        this(id, orderId, orderNumber, customerId, recipientName, recipientPhone, deliveryAddress,
+                totalAmount, status, driverId, (status == AssignmentStatus.ASSIGNED ? updatedAt : null),
+                notes, createdAt, updatedAt);
+    }
+
+    public Assignment(String id, String orderId, String orderNumber, String customerId,
+                      String recipientName, String recipientPhone, String deliveryAddress,
+                      BigDecimal totalAmount, AssignmentStatus status, String driverId,
+                      Instant assignedAt, String notes, Instant createdAt, Instant updatedAt) {
         this.id = id;
         this.orderId = orderId;
         this.orderNumber = orderNumber;
@@ -82,6 +118,7 @@ public class Assignment extends PanacheEntityBase {
         this.totalAmount = totalAmount;
         this.status = status;
         this.driverId = driverId;
+        this.assignedAt = assignedAt;
         this.notes = notes;
         this.createdAt = createdAt;
         this.updatedAt = updatedAt;
@@ -167,6 +204,78 @@ public class Assignment extends PanacheEntityBase {
         this.driverId = driverId;
     }
 
+    public Instant getAssignedAt() {
+        return assignedAt;
+    }
+
+    public void setAssignedAt(Instant assignedAt) {
+        this.assignedAt = assignedAt;
+    }
+
+    public String getUnassignedReason() {
+        return unassignedReason;
+    }
+
+    public void setUnassignedReason(String unassignedReason) {
+        this.unassignedReason = unassignedReason;
+    }
+
+    public Instant getUnassignedAt() {
+        return unassignedAt;
+    }
+
+    public void setUnassignedAt(Instant unassignedAt) {
+        this.unassignedAt = unassignedAt;
+    }
+
+    public String getAssignmentSource() {
+        return assignmentSource;
+    }
+
+    public void setAssignmentSource(String assignmentSource) {
+        this.assignmentSource = assignmentSource;
+    }
+
+    public String getAssignedBy() {
+        return assignedBy;
+    }
+
+    public void setAssignedBy(String assignedBy) {
+        this.assignedBy = assignedBy;
+    }
+
+    public String getPreviousDriverId() {
+        return previousDriverId;
+    }
+
+    public void setPreviousDriverId(String previousDriverId) {
+        this.previousDriverId = previousDriverId;
+    }
+
+    public String getReassignReason() {
+        return reassignReason;
+    }
+
+    public void setReassignReason(String reassignReason) {
+        this.reassignReason = reassignReason;
+    }
+
+    public Instant getReassignedAt() {
+        return reassignedAt;
+    }
+
+    public void setReassignedAt(Instant reassignedAt) {
+        this.reassignedAt = reassignedAt;
+    }
+
+    public String getReassignedBy() {
+        return reassignedBy;
+    }
+
+    public void setReassignedBy(String reassignedBy) {
+        this.reassignedBy = reassignedBy;
+    }
+
     public String getNotes() {
         return notes;
     }
@@ -212,6 +321,15 @@ public class Assignment extends PanacheEntityBase {
                 ", customerId='" + customerId + '\'' +
                 ", status=" + status +
                 ", driverId='" + driverId + '\'' +
+                ", previousDriverId='" + previousDriverId + '\'' +
+                ", assignedAt=" + assignedAt +
+                ", assignmentSource='" + assignmentSource + '\'' +
+                ", assignedBy='" + assignedBy + '\'' +
+                ", reassignReason='" + reassignReason + '\'' +
+                ", reassignedAt=" + reassignedAt +
+                ", reassignedBy='" + reassignedBy + '\'' +
+                ", unassignedReason='" + unassignedReason + '\'' +
+                ", unassignedAt=" + unassignedAt +
                 ", createdAt=" + createdAt +
                 '}';
     }

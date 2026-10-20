@@ -1,0 +1,14 @@
+databaseChangeLog:
+  - changeSet:
+      id: 005-add-unassigned-fields-to-assignments
+      author: logistics-team
+      changes:
+        - addColumn:
+            tableName: assignments
+            columns:
+              - column:
+                  name: unassigned_reason
+                  type: VARCHAR(100)
+              - column:
+                  name: unassigned_at
+                  type: TIMESTAMP

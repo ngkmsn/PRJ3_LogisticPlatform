@@ -7,6 +7,7 @@ public enum AssignmentStatus {
     PENDING,
     SEARCHING_DRIVER,
     ASSIGNED,
+    UNASSIGNED,
     CANCELLED,
     FAILED
 }

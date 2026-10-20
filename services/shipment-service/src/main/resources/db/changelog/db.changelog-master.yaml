@@ -5,3 +5,13 @@ databaseChangeLog:
       file: db/changelog/changes/002-create-assignments-table.yaml
   - include:
       file: db/changelog/changes/003-create-inbox-events-table.yaml
+  - include:
+      file: db/changelog/changes/004-add-assigned-at-to-assignments.yaml
+  - include:
+      file: db/changelog/changes/005-add-unassigned-fields-to-assignments.yaml
+  - include:
+      file: db/changelog/changes/006-add-assignment-source-to-assignments.yaml
+  - include:
+      file: db/changelog/changes/007-add-reassign-fields-to-assignments.yaml
+  - include:
+      file: db/changelog/changes/008-create-assignment-history-table.yaml

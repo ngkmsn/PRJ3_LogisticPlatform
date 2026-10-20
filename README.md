@@ -1527,6 +1527,405 @@ Indexes:
 
 ---
 
+## Dispatching & Assignment: Lấy danh sách Driver Eligible & Eligibility Pipeline (PB-026)
+
+Thiết kế và triển khai khung xử lý **Eligibility Pipeline** (Pipeline Pattern / Chain of Responsibility) tại **Assignment Service** (`shipment-service`) phục vụ bài toán Auto Assignment, cho phép chuẩn bị danh sách Candidate Driver phù hợp từ thông tin đơn hàng mà không vi phạm ranh giới dịch vụ.
+
+### 1. Kiến trúc Pipeline & Tách biệt Ranh giới Dịch vụ (Service Boundary & Design Patterns)
+- **Ranh giới dịch vụ độc lập**: Assignment Service không truy vấn trực tiếp database của `user-service` (`user_db`) hay `order-service` (`order_db`). Dữ liệu Driver được trừu tượng hóa qua giao diện `DriverClient` (sẵn sàng tích hợp REST client, gRPC hoặc Local Read Model/Cache).
+- **Mô hình Dữ liệu Candidate & Yêu cầu Phân công**:
+  - `AssignmentCriteria`: Đóng gói tiêu chí phân công tiếp nhận từ sự kiện đơn hàng (`orderId`, `orderNumber`, `pickupLocation`, `deliveryAddress`, `serviceType`, `requiredVehicleType`, `totalAmount`).
+  - `EligibleDriver`: Mô hình đại diện ứng viên Driver (`driverId`, `driverName`, `phoneNumber`, `vehicleType`, `currentLocation`, `operationalStatus`, `availabilityStatus`, `activeOrdersCount`, `distanceKm`, `suitabilityScore`, `metadata`).
+- **Mẫu thiết kế Pipeline Pattern (Chain of Responsibility)**:
+  - `DriverEligibilityFilter`: Giao diện chung cho các bước lọc/chấm điểm (`filter(List<EligibleDriver> candidates, AssignmentCriteria criteria)` và `getOrder()`).
+  - `DriverEligibilityPipeline`: Tự động nạp toàn bộ các bộ lọc thông qua Quarkus CDI `Instance<DriverEligibilityFilter>`, sắp xếp tuần tự theo `order` tăng dần. Hỗ trợ cơ chế ngắt sớm (early-exit) khi danh sách ứng viên rỗng.
+  - `BaseEligibilityFilter`: Bộ lọc cơ sở (`order = 0`) kiểm tra ID hợp lệ và trạng thái hoạt động (`operationalStatus == ACTIVE`).
+  - Cấu trúc mở sẵn sàng tích hợp các bước lọc/chấm điểm riêng biệt: **PB-027** (Availability filter), **PB-028** (Geographic distance/radius), và **PB-029** (Workload & Scoring) mà không ảnh hưởng cấu trúc chung.
+- **Dịch vụ Điều phối Fail-safe (`DriverEligibilityService`)**:
+  - `DefaultDriverEligibilityService`: Kiểm tra tính hợp lệ của `AssignmentCriteria`, truy vấn ứng viên qua `DriverClient`, dẫn luồng qua `DriverEligibilityPipeline`.
+  - Cơ chế **Fail-safe**: Xử lý an toàn khi không tìm thấy Driver hoặc xảy ra lỗi kết nối ngoại vi — ghi log chẩn đoán chi tiết và trả về danh sách rỗng an toàn (`Collections.emptyList()`), không ném unhandled exception làm gián đoạn luồng tự động gán.
+
+---
+
+## Dispatching & Assignment: Lọc Driver Theo Availability (PB-027)
+
+Triển khai bước lọc **Driver Availability** (`DriverAvailabilityFilter`) tích hợp trực tiếp vào **Eligibility Pipeline** tại **Assignment Service** (`shipment-service`), nhằm loại bỏ các tài xế offline, không hoạt động, không sẵn sàng nhận đơn hoặc đã đầy tải.
+
+### 1. Kiến trúc Bộ lọc Availability & Quy tắc Nghiệp vụ
+- **Vị trí trong Pipeline**: `DriverAvailabilityFilter` cài đặt interface `DriverEligibilityFilter` với `@ApplicationScoped` và thứ tự thực thi `order = 10` (chạy ngay sau `BaseEligibilityFilter` ở `order = 0`). Pipeline tự động kích hoạt bộ lọc thông qua CDI mà không cần sửa đổi cấu trúc điều phối chung.
+- **Tiêu chí Kiểm tra Availability & Sẵn sàng Nhận đơn**:
+  1. **Trạng thái Hoạt động (Operational Status)**: Bắt buộc `status` không null và bằng `"ACTIVE"` (không phân biệt hoa thường). Loại bỏ ngay các tài xế có trạng thái `"INACTIVE"`, `"OFFLINE"`, `"SUSPENDED"`, `"BUSY"`, `"DEACTIVATED"`, `null` hoặc khoảng trắng.
+  2. **Trạng thái Khả dụng (Driver Availability)**: Bắt buộc `availability == DriverAvailability.AVAILABLE`. Loại bỏ các tài xế có `DriverAvailability.UNAVAILABLE` hoặc `null`.
+  3. **Cờ Sẵn sàng trong Metadata (Readiness Flags)**: Kiểm tra các thuộc tính metadata tùy biến như `online == false`, `isOnline == false`, `ready == false`, hoặc `acceptingOrders == false`.
+  4. **Giới hạn Đơn hàng Đồng thời & Sức tải (Workload / Capacity Check)**:
+     - Nếu `currentWorkload` được cung cấp: kiểm tra `currentWorkload >= capacity` hoặc `currentWorkload < 0` (trạng thái âm không hợp lệ) để loại bỏ tài xế quá tải.
+     - Nếu `currentWorkload == null`: truy vấn trực tiếp số lượng đơn hàng đang được phân công (`AssignmentStatus.ASSIGNED`) của tài xế thông qua `AssignmentRepository.countActiveAssignmentsByDriverId(driverId)`. Nếu vượt ngưỡng tối đa, loại bỏ tài xế và đồng thời cập nhật làm giàu trường `currentWorkload` cho candidate.
+     - Ngưỡng giới hạn sức tải cấu hình qua `logistics.assignment.driver.max-concurrent-orders` (mặc định là `3` đơn) hoặc giá trị riêng biệt từ metadata `maxOrders`/`capacity`.
+- **Tính Bất biến & An toàn**: Quá trình lọc là thuần túy kiểm tra (read-only), không làm thay đổi trạng thái của các tài xế khác trong hệ thống hay ảnh hưởng tới các đơn hàng đã phân công trước đó. Trả về danh sách rỗng an toàn nếu không tìm thấy ứng viên thỏa mãn.
+
+---
+
+## Dispatching & Assignment: Lọc Driver Theo Workload & Điều Phối Ưu Tiên (PB-028)
+
+Triển khai bước đánh giá và lọc khối lượng công việc hiện tại của Driver (`DriverWorkloadFilter`) trong **Eligibility Pipeline** tại **Assignment Service** (`shipment-service`), nhằm ngăn chặn quá tải đơn hàng cho tài xế và tối ưu hóa thứ tự phân công.
+
+### 1. Kiến trúc Bộ lọc Workload & Quy tắc Nghiệp vụ
+- **Vị trí trong Pipeline**: `DriverWorkloadFilter` cài đặt `DriverEligibilityFilter` với `@ApplicationScoped` và thứ tự thực thi `order = 20` (chạy tuần tự ngay sau `DriverAvailabilityFilter` ở `order = 10`).
+- **Cách Biểu diễn & Tính toán Workload**:
+  - Tái sử dụng trường `currentWorkload` từ đối tượng candidate nếu đã có sẵn.
+  - Trường hợp `currentWorkload == null`: truy vấn trực tiếp số lượng đơn hàng đang được phân công (`status = AssignmentStatus.ASSIGNED`) của tài xế thông qua `AssignmentRepository.countActiveAssignmentsByDriverId(driverId)`. Không tính các đơn đã hủy (`CANCELLED`) hoặc thất bại (`FAILED`).
+  - Dữ liệu thiếu hụt hoặc không thể truy vấn DB được xử lý fail-safe mặc định về `0` đơn hoạt động. Dữ liệu tải âm (< 0) bị coi là bất thường và loại bỏ ứng viên ngay lập tức.
+- **Giới hạn Cứng (Hard Limit) & Giới hạn Mềm (Soft Limit)**:
+  - **Giới hạn Cứng (`hardLimit`, mặc định: 3 đơn)**: Loại bỏ dứt điểm các tài xế vượt quá giới hạn cứng (`workload > hardLimit`). Nếu bật cờ nghiêm ngặt `reject-at-hard-limit = true`, tài xế chạm đúng ngưỡng cũng bị loại bỏ.
+  - **Giới hạn Mềm (`softLimit`, mặc định: 2 đơn)**: Tài xế đạt hoặc tiến gần giới hạn mềm (`softLimit <= workload <= hardLimit`) vẫn được giữ lại trong danh sách ứng viên, nhưng bị giảm mức ưu tiên (áp dụng điểm phạt `softLimitPenalty = -30.0` hoặc `hardLimitPenalty = -60.0` vào `score`).
+  - **Ưu tiên Tài xế Nhàn rỗi (`workload == 0`)**: Được cộng điểm thưởng ưu tiên (`idleBonus = +20.0`) để ưu tiên gán đơn trước tiên.
+  - **Sắp xếp Ứng viên Theo Điểm Ưu Tiên**: Danh sách candidate sau khi lọc được tự động sắp xếp theo `score` giảm dần, đảm bảo các tài xế có workload tối ưu nhất luôn đứng đầu danh sách dispatching.
+- **Cấu hình Linh hoạt**: Cho phép cấu hình qua file `application.properties`:
+  - `logistics.assignment.driver.workload.hard-limit=3`
+  - `logistics.assignment.driver.workload.soft-limit=2`
+  - `logistics.assignment.driver.workload.soft-limit-penalty=30.0`
+  - `logistics.assignment.driver.workload.idle-bonus=20.0`
+  - Hỗ trợ ghi đè giới hạn riêng cho từng tài xế qua thuộc tính `hardLimit`, `softLimit`, `maxOrders` trong `metadata`.
+
+---
+
+## Dispatching & Assignment: Tính Proximity Tới Pickup Bằng Công Thức Haversine (PB-029)
+
+Triển khai bước tính toán khoảng cách địa lý (`DriverProximityFilter`) giữa vị trí hiện tại của Driver và điểm lấy hàng (pickup) trong **Eligibility Pipeline** tại **Assignment Service** (`shipment-service`), phục vụ cho thuật toán xếp hạng và tự động gán đơn.
+
+### 1. Kiến trúc Bộ tính Khoảng cách & Quy tắc Nghiệp vụ
+- **Vị trí trong Pipeline**: `DriverProximityFilter` cài đặt `DriverEligibilityFilter` với `@ApplicationScoped` và thứ tự thực thi `order = 30` (chạy tuần tự ngay sau `DriverWorkloadFilter` ở `order = 20`).
+- **Tiện ích Tính Khoảng cách Địa lý (`GeoDistanceCalculator`)**:
+  - Triển khai công thức toán học **Haversine** (bán kính Trái Đất chuẩn $R = 6371.0088\text{ km}$) tính khoảng cách đường chim bay giữa hai cặp tọa độ GPS `(lat, lon)`.
+  - Chuẩn hóa toàn bộ kết quả đo lường theo đơn vị **Kilometers (km)** với độ chính xác làm tròn 2 chữ số thập phân (`RoundingMode.HALF_UP`).
+  - Hoạt động hoàn toàn độc lập, không phụ thuộc vào bất kỳ API bản đồ trả phí nào.
+- **Mô hình Dữ liệu Vị trí (`GeoLocation`) & Hỗ trợ Đa nguồn**:
+  - `GeoLocation`: Value Object đóng gói `latitude` (`[-90.0, 90.0]`), `longitude` (`[-180.0, 180.0]`) và `timestamp`.
+  - Hỗ trợ trích xuất tọa độ từ trường số (`pickupLatitude`, `pickupLongitude`, `currentLatitude`, `currentLongitude`) hoặc tự động parse từ chuỗi ký tự dạng `"lat, lon"` (ví dụ: `"10.776889, 106.700806"`).
+- **Quy tắc Xử lý Dữ liệu Vị trí Không hợp lệ hoặc Thiếu hụt**:
+  - **Driver thiếu tọa độ hoặc tọa độ không hợp lệ**: Gán `driver.setDistanceKm(null)` và đánh dấu `metadata.locationValid = false`. **Tuyệt đối không gán `0.0 km`** nhằm tránh lỗi thiên kiến coi tài xế thiếu vị trí là người gần điểm lấy hàng nhất.
+  - **Đơn hàng thiếu tọa độ pickup**: Ghi log cảnh báo chẩn đoán, đánh dấu `pickupLocationValid = false`, bảo toàn danh sách ứng viên mà không làm phát sinh unhandled exception.
+  - **Phát hiện Vị trí Cũ (Stale Location Check)**: Tọa độ GPS có thời điểm cập nhật cũ hơn ngưỡng cấu hình `logistics.assignment.driver.location.max-age-minutes` (mặc định: 30 phút) sẽ được gắn cờ `metadata.locationStale = true` kèm số phút trễ `locationAgeMinutes`.
+
+---
+
+## Dispatching & Assignment: Chọn Driver Phù Hợp Nhất & Hoàn Tất Phân Công (PB-030)
+
+Triển khai bước hoàn thiện luồng tự động phân công đơn hàng (**Auto Assignment**) tại **Assignment Service** (`shipment-service`), tích hợp toàn bộ chuỗi 4 giai đoạn xử lý ứng viên (PB-026, PB-027, PB-028, PB-029) để lựa chọn đúng một tài xế phù hợp nhất và cập nhật trạng thái phân công an toàn trong cơ sở dữ liệu.
+
+### 1. Luồng Tích hợp Tuần tự
+Hệ thống kết nối các bước theo thứ tự nghiêm ngặt:
+1. **Lấy danh sách ứng viên (PB-026)**: Thông qua `DriverClient` tuân thủ đúng ranh giới service boundary.
+2. **Lọc Availability (PB-027)**: `DriverAvailabilityFilter` (`order = 10`) loại bỏ tài xế `UNAVAILABLE`, `INACTIVE` hoặc chưa sẵn sàng.
+3. **Đánh giá Workload (PB-028)**: `DriverWorkloadFilter` (`order = 20`) loại bỏ tài xế vượt giới hạn cứng (`workload > hardLimit`), áp dụng điểm thưởng cho tài xế nhàn rỗi (`+20`) và phạt điểm tài xế chạm giới hạn mềm (`-30`).
+4. **Tính Proximity (PB-029)**: `DriverProximityFilter` (`order = 30`) tính khoảng cách Haversine tới điểm lấy hàng (`distanceKm`) và kiểm tra độ mới GPS.
+5. **Xếp hạng & Chấm điểm Tổng hợp (PB-030)**: `DriverSelectionService` tính điểm tổng hợp (`compositeScore`) cho các tài xế đủ điều kiện còn lại.
+6. **Xác nhận Phân công An toàn Giao dịch (PB-030)**: `DefaultAssignmentService.autoAssignOrder(...)` kiểm tra giới hạn workload tại thời điểm commit; cập nhật trạng thái sang `ASSIGNED` kèm `driverId` hoặc fallback sang `SEARCHING_DRIVER` nếu không có ai khả dụng.
+
+### 2. Thuật toán Xếp hạng & Điểm Tổng hợp (Composite Scoring)
+Điểm số tổng hợp được tính theo công thức:
+$$\text{CompositeScore} = \text{Score}_{\text{workload}} - (\text{DistanceKm} \times W_{\text{distance}}) - \text{Penalty}_{\text{stale}} - \text{Penalty}_{\text{missing}}$$
+
+- **Trọng số phạt theo khoảng cách ($W_{\text{distance}}$)**: `logistics.assignment.scoring.distance-penalty-per-km=2.0` (mỗi km xa hơn bị trừ 2.0 điểm).
+- **Phạt vị trí GPS cũ ($\text{Penalty}_{\text{stale}}$)**: `logistics.assignment.scoring.stale-location-penalty=15.0` (áp dụng khi tọa độ > 30 phút).
+- **Phạt tài xế thiếu dữ liệu vị trí ($\text{Penalty}_{\text{missing}}$)**: `logistics.assignment.scoring.missing-location-penalty=50.0` (đảm bảo tài xế thiếu GPS luôn xếp sau tài xế có GPS hợp lệ).
+
+### 3. Quy tắc Xử lý Hòa điểm Ổn định (Deterministic Tie-Breaker)
+Khi nhiều tài xế có cùng điểm số tổng hợp (sai số $\le 10^{-4}$):
+1. **Cấp 1 - Khoảng cách tới pickup**: Ưu tiên tài xế có `distanceKm` nhỏ hơn.
+2. **Cấp 2 - Workload**: Ưu tiên tài xế có `currentWorkload` thấp hơn.
+3. **Cấp 3 - Natural Driver ID**: So sánh thứ tự tự nhiên của `driverId` theo bảng chữ cái để đảm bảo 100% tái lập được trong kiểm thử tự động.
+
+### 4. Cơ chế Bảo đảm Tính Nhất quán Đồng thời (Concurrency Safety)
+- Thao tác xác nhận phân công được thực hiện trong database transaction:
+  - Truy vấn số lượng assignment đang kích hoạt trong DB: `assignmentRepository.countActiveAssignmentsByDriverId(candidateId)`.
+  - Nếu `activeWorkload < hardLimit`: gán đơn thành công (`status = ASSIGNED`, `driverId = candidate.id`).
+  - Nếu xảy ra race condition khiến tài xế bị đầy tải ngay trước thời điểm commit: hệ thống tự động chuyển sang ứng viên tốt kế tiếp trong danh sách đã xếp hạng.
+  - Nếu tất cả ứng viên đều quá tải hoặc danh sách rỗng: cập nhật trạng thái sang `SEARCHING_DRIVER`, `driverId = null` và ghi log chẩn đoán rõ ràng mà không làm gián đoạn hệ thống.
+
+---
+
+## Dispatching & Assignment: Tạo Assignment Tại Assignment Service & Ràng Buộc Active Assignment Duy Nhất (PB-031)
+
+Triển khai logic khởi tạo, lưu trữ và ràng buộc toàn vẹn dữ liệu cho bản ghi `Assignment` khi đã chọn được Driver phù hợp, liên kết chặt chẽ Order với Assignment trong cơ sở dữ liệu `shipment_db`.
+
+### 1. Cập Nhật Cấu Trúc Schema & Entity Assignment
+- **Cột Mới `assigned_at`**: Bổ sung cột `assigned_at TIMESTAMP` thông qua Liquibase changeset `004-add-assigned-at-to-assignments.yaml`.
+- **Entity [Assignment.java](file:///Users/ngkmsn/PRJ3/services/shipment-service/src/main/java/com/logistics/shipment/entity/Assignment.java)**:
+  - Bổ sung trường `assignedAt` (`Instant assignedAt`) kèm getter/setter và constructor mở rộng.
+  - Tự động ghi nhận `assignedAt = Instant.now()` khi trạng thái chuyển sang hoặc khởi tạo với `AssignmentStatus.ASSIGNED`.
+  - Giữ `assignedAt = null` đối với các đơn ở trạng thái sơ khởi `PENDING` hoặc `SEARCHING_DRIVER`.
+
+### 2. Logic Khởi Tạo & Gán Driver
+- **`CreateAssignmentRequest`**: DTO đóng gói tham số tạo mới Assignment liên kết trực tiếp với Driver đã được tuyển chọn.
+- **Phương Thức Nghiệp Vụ Trong `AssignmentService`**:
+  - `createAssignment(CreateAssignmentRequest request)`: Tạo mới hoặc chuyển đổi Assignment sang `ASSIGNED`, gán `driverId`, lưu `assignedAt`.
+  - `assignDriver(String orderId, String driverId)`: Gán driver cho đơn hàng đã tồn tại.
+  - Đồng bộ cập nhật `assignedAt` trong luồng `autoAssignOrder(...)` từ PB-030.
+
+### 3. Ràng Buộc Active Assignment Duy Nhất (Data Integrity & Concurrency)
+- **Cơ sở dữ liệu**: Bảng `assignments` duy trì ràng buộc `order_id UNIQUE` ngăn chặn triệt để việc tạo 2 bản ghi assignment cho cùng một order ở tầng DB.
+- **Tầng Ứng Dụng**:
+  - `AssignmentRepository.findActiveAssignmentByOrderId(orderId)` truy vấn các assignment đang active (`PENDING`, `SEARCHING_DRIVER`, `ASSIGNED`).
+  - Khi có yêu cầu tạo/gán assignment:
+    - Nếu đã được gán cho cùng driver: Trả về bản ghi hiện tại (Idempotent).
+    - Nếu đã được gán cho driver khác: Ném ngoại lệ nghiệp vụ rõ ràng `DuplicateAssignmentException`.
+
+---
+
+## Dispatching & Assignment: Publish DriverAssigned Event Tại Assignment Service (PB-032)
+
+Triển khai cơ chế phát hành bất đồng bộ sự kiện nghiệp vụ `DRIVER_ASSIGNED` từ **Assignment Service** lên Apache Kafka topic `logistics.shipment.events` khi một Assignment được tạo hoặc gán Driver thành công, nhằm thông báo cho các downstream services (Order Service, Notification Service).
+
+### 1. Event Contract & Envelope
+- **Phong bì sự kiện (`DomainEvent<T>`)**: Sử dụng chuẩn universal envelope chung của hệ thống kế thừa từ PB-022/PB-023:
+  - `eventId`: UUID định danh sự kiện duy nhất.
+  - `eventType`: `"DRIVER_ASSIGNED"`.
+  - `aggregateId`: `orderId`.
+  - `timestamp`: Thời điểm gán driver (`assignedAt`).
+  - `payload`: `DriverAssignedPayload` (chứa `assignmentId`, `orderId`, `orderNumber`, `customerId`, `driverId`, `status = ASSIGNED`, `deliveryAddress`, `totalAmount`, `notes`).
+- **Kafka Topic & Partition Key**:
+  - Topic: `KafkaTopics.SHIPMENT_EVENTS = "logistics.shipment.events"`.
+  - Partition Key: `orderId` (đảm bảo tính tuần tự các sự kiện theo từng đơn hàng).
+
+### 2. Độ Tin Cậy & Tính Toàn Vẹn Transaction (Post-Commit Publishing)
+- **Tích hợp Phát Sự kiện**: Tích hợp trực tiếp vào các điểm kết thúc phân công thành công (`createAssignment`, `assignDriver`, `autoAssignOrder`).
+- **Bảo đảm không rò rỉ sự kiện (Rollback Safety)**: Event chỉ được gửi khi thao tác lưu DB ở PB-031 đã hoàn thành trọn vẹn. Nếu xảy ra lỗi DB, vi phạm ràng buộc duplicate hoặc exception $\rightarrow$ **tuyệt đối không có sự kiện nào được phát ra**.
+- **Chống trùng lặp (Idempotency)**: Khi nhận các request phân công trùng lặp cho cùng một driver, hệ thống trả về bản ghi hiện tại và không bắn lại duplicate event.
+
+---
+
+## Dispatching & Assignment: Xử Lý Trường Hợp Không Có Driver Phù Hợp & Chuyển Trạng Thái UNASSIGNED (PB-033)
+
+Triển khai nhánh xử lý fallback khi quá trình tự động tìm kiếm, lọc và phân công (PB-026 đến PB-030) không tìm được bất kỳ Driver nào phù hợp, đưa đơn hàng vào trạng thái `UNASSIGNED` sẵn sàng cho bộ phận vận hành (Operations) can thiệp thủ công ở PB-034/PB-035.
+
+### 1. Phân Nhánh Xử Lý & Nguyên Nhân Không Gán Được (Unassigned Reasons)
+Hệ thống nhận diện và phân biệt 2 kịch bản chính:
+- **`NO_ELIGIBLE_DRIVER`**:
+  - Danh sách Driver ứng viên ban đầu rỗng hoặc toàn bộ ứng viên bị loại bỏ bởi chuỗi lọc (PB-026 Candidate Retrieval, PB-027 Availability, PB-028 Workload, PB-029 Proximity).
+- **`ALL_DRIVERS_BUSY`**:
+  - Có ứng viên sống sót sau chuỗi lọc, nhưng tại thời điểm commit transaction xác nhận phân công, toàn bộ các ứng viên đều đã chạm ngưỡng tải tối đa (`activeWorkload >= hardLimit`) do có các đơn hàng khác gán đồng thời.
+
+### 2. Cập Nhật Cấu Trúc Trạng Thái & Dữ Liệu
+- **Trạng thái Mới `AssignmentStatus.UNASSIGNED`**: Bổ sung giá trị `UNASSIGNED` vào enum `AssignmentStatus`.
+- **Cột Mới Trong Database**:
+  - `unassigned_reason VARCHAR(100)`: Lưu mã nguyên nhân (`NO_ELIGIBLE_DRIVER` hoặc `ALL_DRIVERS_BUSY`).
+  - `unassigned_at TIMESTAMP`: Thời điểm chuyển sang trạng thái chờ vận hành xử lý thủ công.
+  - Được tự động cập nhật qua Liquibase changeset `005-add-unassigned-fields-to-assignments.yaml`.
+- **Bảo Vệ Tính Toàn Vẹn**:
+  - Khi đơn chuyển sang `UNASSIGNED`, `driverId` giữ `null` và tuyệt đối **không phát sinh sự kiện `DRIVER_ASSIGNED`** lên Kafka broker.
+
+---
+
+## Dispatching & Assignment: API Cho Phép Operations Xem Danh Sách Order Chưa Được Assign (PB-034)
+
+Xây dựng endpoint RESTful cho phép bộ phận vận hành (Operations/Dispatchers/Admins) theo dõi và truy vấn danh sách các đơn hàng chưa gán được tài xế tự động từ PB-033 hoặc đang cần can thiệp xử lý thủ công.
+
+### 1. Phân Quyền & Bảo Mật (Security & RBAC)
+- Khởi tạo bean `JwtTokenProvider` trong `shipment-service` thông qua `SecurityConfig`.
+- Kiểm tra tính hợp lệ của JWT token từ header `Authorization: Bearer <token>`.
+- Chỉ người dùng có vai trò `DISPATCHER` hoặc `ADMIN` (mang quyền `SHIPMENT_READ` / `SHIPMENT_ASSIGN`) mới có thể truy xuất.
+- Trả về `401 Unauthorized` nếu thiếu/sai token và `403 Forbidden` nếu là `CUSTOMER` hoặc `DRIVER`.
+
+### 2. Mô Hình Dữ Liệu & API Endpoints
+- **Endpoints Hỗ Trợ**:
+  - `GET /assignments/unassigned` & `GET /api/assignments/unassigned` (và gateway proxy: `GET /api/shipments/assignments/unassigned`)
+  - `GET /assignments/unassigned/{orderId}` & `GET /api/assignments/unassigned/{orderId}` (và gateway proxy: `GET /api/shipments/assignments/unassigned/{orderId}`)
+- **Hỗ Trợ Phân Trang & Sắp Xếp (Pagination & Sorting)**:
+  - Query parameters: `page` (default 0), `size` (default 10), `status` (default `UNASSIGNED`), `sort` (default `oldest_first`).
+  - Thứ tự ưu tiên mặc định (`oldest_first`): Đơn hàng đã chờ lâu nhất được đưa lên đầu hàng đợi (`unassignedAt ASC, createdAt ASC`).
+- **Cấu Trúc Response DTO (`UnassignedOrderDto`)**:
+  - `orderId`, `assignmentId`, `orderNumber`, `customerId`, `recipientName`, `recipientPhone`.
+  - Thông tin điểm lấy hàng & giao hàng: `pickupAddress`, `dropoffAddress` (từ `deliveryAddress`).
+  - Trạng thái hiện tại: `status` (`UNASSIGNED`).
+  - Lý do chưa gán được: `unassignedReason` (`NO_ELIGIBLE_DRIVER` hoặc `ALL_DRIVERS_BUSY`).
+  - Thời gian tạo & chờ: `unassignedAt`, `createdAt`, `updatedAt`, `waitingTimeSeconds` (thời gian đã chờ tính bằng giây).
+- **Tính Toàn Vẹn Dữ Liệu**:
+  - Truy vấn trực tiếp từ bảng `assignments` thuộc cơ sở dữ liệu `shipment_db` của `shipment-service`, bảo đảm tuyệt đối service boundary (không truy vấn trực tiếp vào cơ sở dữ liệu của `order-service`).
+  - Các đơn hàng đã được phân công thành công (`ASSIGNED`, `COMPLETED`, `CANCELLED`) tuyệt đối không bị lẫn vào danh sách hàng đợi này.
+
+---
+
+## Dispatching & Assignment: Chức Năng Operations Manual Assign Tại Assignment Service (PB-035)
+
+Xây dựng Command API endpoint cho phép bộ phận vận hành (Operations/Dispatchers/Admins) chỉ định thủ công một Driver cụ thể cho một đơn hàng đang ở trạng thái chưa được assign (`UNASSIGNED`, `PENDING`, `SEARCHING_DRIVER`).
+
+### 1. Phân Quyền & Quy Tắc Xác Thực (Strict Pre-assignment Validation)
+- **Kiểm Tra Quyền Hạn (RBAC)**: Chỉ người dùng có vai trò `DISPATCHER` hoặc `ADMIN` mới được phép thực hiện gán thủ công. Trả về `401 Unauthorized` nếu thiếu/sai token, `403 Forbidden` nếu người gọi là `CUSTOMER` hoặc `DRIVER`.
+- **Kiểm Tra Trạng Thái Đơn Hàng**:
+  - Đơn hàng phải tồn tại trong Assignment Service (trả về `404 Not Found` nếu không tìm thấy bản ghi `Assignment`).
+  - Đơn hàng phải đang ở trạng thái hợp lệ để gán mới (`UNASSIGNED`, `PENDING`, `SEARCHING_DRIVER`).
+  - **Chặn đơn đã có Driver**: Nếu đơn đã ở trạng thái `ASSIGNED`, từ chối gán mới và trả về `409 Conflict` (`DuplicateAssignmentException`).
+  - Nếu đơn đã ở trạng thái kết thúc (`CANCELLED`, `FAILED`), từ chối với `400 Bad Request`.
+- **Kiểm Tra Tính Hợp Lệ Của Driver**:
+  - Tích hợp `DriverClient.findDriverById(driverId)` để xác thực Driver tồn tại và đang sẵn sàng nhận đơn.
+  - Từ chối với `400 Bad Request` nếu `driverId` trống, không tồn tại hoặc không khả dụng.
+
+### 2. Cập Nhật Database & Mô Hình Dữ Liệu
+- **Liquibase Changeset `006-add-assignment-source-to-assignments.yaml`**:
+  - Bổ sung cột `assignment_source VARCHAR(30) DEFAULT 'AUTO'` để phân biệt nguồn gán tự động (`AUTO`) và gán thủ công (`MANUAL`).
+  - Bổ sung cột `assigned_by VARCHAR(100)` lưu username/ID của nhân viên vận hành thực hiện thao tác.
+- **Cập Nhật Thực Thể `Assignment`**:
+  - Cập nhật `driverId`, chuyển trạng thái sang `ASSIGNED`, ghi nhận `assignedAt = Instant.now()`.
+  - Ghi nhận `assignmentSource = "MANUAL"` và `assignedBy = operator.getUsername()`.
+  - Xóa sạch vết `unassignedReason` và `unassignedAt`.
+  - Tự động bổ sung ghi chú vận hành `[Manual Assign]` vào trường `notes`.
+
+### 3. Phát Hành Event Lên Kafka Broker
+- **Tái Sử Dụng Hạ Tầng PB-032**: Ngay khi giao dịch gán thủ công hoàn tất thành công, hệ thống tự động phát hành sự kiện `DRIVER_ASSIGNED` lên Kafka topic `logistics.shipment.events`.
+- Đảm bảo tính nhất quán trên toàn hệ thống (Order Service, Notification Service) như khi gán tự động thành công.
+
+### 4. REST API Endpoints
+- `POST /assignments/{orderId}/manual-assign`
+- `POST /api/assignments/{orderId}/manual-assign`
+- `POST /api/shipments/assignments/{orderId}/manual-assign` (hỗ trợ routing qua API Gateway Vert.x Reverse Proxy)
+- **Request Body**: `ManualAssignDriverRequest` (`driverId`, `notes`).
+- **Response Body**: `ApiResponse<AssignmentResponseDto>` trả về thông tin chi tiết của bản ghi Assignment sau khi gán.
+
+---
+
+## Dispatching & Assignment: Chức Năng Operations Reassign Tại Assignment Service (PB-036)
+
+Cung cấp API và nghiệp vụ xử lý cho phép bộ phận vận hành (Operations/Dispatchers/Admins) đổi (reassign) từ Driver hiện tại sang một Driver mới cho Order trong các trường hợp cần thiết (tài xế gặp sự cố xe, giao chậm, điều phối khẩn cấp).
+
+### 1. Phân Quyền & Quy Tắc Kiểm Tra Điều Kiện (Strict Pre-reassignment Validation)
+- **Kiểm Tra Quyền Hạn (RBAC)**: Chỉ người dùng có vai trò `DISPATCHER` hoặc `ADMIN` mới được phép đổi tài xế. Trả về `401 Unauthorized` nếu thiếu/sai token, `403 Forbidden` nếu người gọi là `CUSTOMER` hoặc `DRIVER`.
+- **Kiểm Tra Trạng Thái Đơn Hàng**:
+  - Đơn hàng phải tồn tại trong cơ sở dữ liệu `shipment_db` (trả về `404 Not Found` nếu không tìm thấy bản ghi `Assignment`).
+  - Đơn hàng phải đang có một Assignment hiện hành (`status == ASSIGNED` với `driverId != null`). Nếu đơn đang ở trạng thái `UNASSIGNED`, `PENDING` hoặc `SEARCHING_DRIVER`, từ chối với `400 Bad Request`.
+  - Không cho phép đổi tài xế nếu đơn hàng đã hoàn tất hoặc đã bị hủy (`CANCELLED`, `FAILED`) -> trả về `400 Bad Request`.
+- **Kiểm Tra Tính Hợp Lệ Của Driver Mới**:
+  - Driver mới (`new_driver_id`) phải khác với Driver hiện tại đang gán cho đơn (`IllegalArgumentException` -> `400 Bad Request`).
+  - Driver mới phải tồn tại và khả dụng theo `DriverClient.findDriverById(newDriverId)` (`400 Bad Request` nếu không tìm thấy hoặc offline).
+
+### 2. Cập Nhật Database & Tính Toán Workload Tự Động
+- **Liquibase Changeset `007-add-reassign-fields-to-assignments.yaml`**:
+  - `previous_driver_id VARCHAR(36)`: Lưu ID của tài xế trước đó để phục vụ audit và truy vết lịch sử.
+  - `reassign_reason VARCHAR(255)`: Lý do nghiệp vụ thực hiện đổi tài xế (ví dụ: xe hỏng, chậm tiến độ).
+  - `reassigned_at TIMESTAMP WITH TIME ZONE`: Thời điểm thực hiện đổi tài xế.
+  - `reassigned_by VARCHAR(100)`: Username/ID của nhân viên vận hành thực hiện thao tác.
+- **Cập Nhật Thực Thể `Assignment` Trong Cùng Một Giao Dịch (`@Transactional`)**:
+  - Lưu `previousDriverId = currentDriverId`, `driverId = newDriverId`, `reassignReason = request.reason`.
+  - Cập nhật mốc thời gian: `reassignedAt = now`, `assignedAt = now`, `updatedAt = now`.
+  - Ghi nhận `reassignedBy = operator.getUsername()`, `assignedBy = operator.getUsername()`, `assignmentSource = "MANUAL"`.
+  - Tự động bổ sung ghi chú vận hành `[Reassigned]` vào trường `notes`.
+- **Workload Tự Động Điều Chỉnh Tức Thì**:
+  - Bảng `assignments` sử dụng mô hình active assignment duy nhất cho mỗi đơn hàng (`order_id` unique).
+  - Khi cập nhật `driverId` sang tài xế mới, hàm đếm đơn active `countActiveAssignmentsByDriverId(previousDriverId)` tự động giảm đi 1 (giải phóng slot cho tài xế cũ), đồng thời `countActiveAssignmentsByDriverId(newDriverId)` tự động tăng thêm 1 (ghi nhận tải mới cho tài xế thay thế).
+
+### 3. Phát Hành Sự Kiện (Event Broadcasting)
+- **Domain Event `DRIVER_REASSIGNED`**:
+  - Gói tin payload `DriverReassignedPayload` gồm `assignmentId`, `orderId`, `orderNumber`, `customerId`, `previousDriverId`, `newDriverId`, `reassignReason`, `reassignedAt`, `reassignedBy`, `status`, `notes`.
+  - Bọc trong envelope `DomainEvent<DriverReassignedPayload>` với `eventType = "DRIVER_REASSIGNED"` và timestamp chuẩn ISO-8601.
+  - Gửi đến Kafka topic `logistics.shipment.events` với partition key là `orderId` nhằm bảo đảm thứ tự phân vùng (in-order delivery).
+- **Tương Thích Ngược (Backwards Compatibility)**:
+  - Đồng thời phát hành `DRIVER_ASSIGNED` để các service downstream chỉ lắng nghe sự kiện gán chung (như Order Service hoặc Notification Service) lập tức cập nhật tài xế mới mà không gặp gián đoạn.
+
+### 4. REST API Endpoints
+- `POST /assignments/{orderId}/reassign`
+- `POST /api/assignments/{orderId}/reassign`
+- `POST /api/shipments/assignments/{orderId}/reassign` (hỗ trợ routing qua API Gateway Vert.x Reverse Proxy)
+- **Request Body (`ReassignDriverRequest`)**:
+  ```json
+  {
+    "newDriverId": "DRV-NEW-002",
+    "reason": "Driver vehicle breakdown on highway",
+    "notes": "Urgent re-dispatch requested by driver"
+  }
+  ```
+- **Success Response (`200 OK`)**:
+  ```json
+  {
+    "success": true,
+    "message": "Driver reassigned successfully",
+    "data": {
+      "assignmentId": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+      "orderId": "ORD-12345",
+      "orderNumber": "ORD-20261020-001",
+      "customerId": "cust-001",
+      "driverId": "DRV-NEW-002",
+      "status": "ASSIGNED",
+      "assignedAt": "2026-10-20T08:45:00Z",
+      "assignmentSource": "MANUAL",
+      "assignedBy": "dispatcher1",
+      "previousDriverId": "DRV-OLD-001",
+      "reassignReason": "Driver vehicle breakdown on highway",
+      "reassignedAt": "2026-10-20T08:45:00Z",
+      "reassignedBy": "dispatcher1",
+      "notes": "Delivery note [Reassigned] Urgent re-dispatch requested by driver"
+    }
+  }
+  ```
+
+---
+
+## Dispatching & Assignment: Lưu Assignment History Tại Assignment Service (PB-037)
+
+Cung cấp cơ chế lưu trữ lịch sử kiểm toán (Audit / History Log) toàn diện cho toàn bộ các lần tạo và thay đổi phân công (Assignment & Reassignment) của một Order tại `shipment-service`, phục vụ việc truy vết vận hành, đánh giá chất lượng điều phối và giải quyết khiếu nại.
+
+### 1. Kiến Trúc Lưu Trữ Lịch Sử (Audit History Data Model)
+- **Bảng `assignment_histories` (Liquibase Changeset `008-create-assignment-history-table.yaml`)**:
+  - `id VARCHAR(36) PRIMARY KEY`: Định danh duy nhất cho từng bản ghi log lịch sử.
+  - `order_id VARCHAR(100) NOT NULL`: ID đơn hàng liên kết (có index phục vụ truy vấn nhanh).
+  - `assignment_id VARCHAR(100) NOT NULL`: ID bản ghi Assignment tương ứng.
+  - `previous_driver_id VARCHAR(100)`: ID tài xế trước khi thay đổi (`NULL` đối với lần gán đầu tiên).
+  - `new_driver_id VARCHAR(100) NOT NULL`: ID tài xế được gán mới / thay thế.
+  - `action_type VARCHAR(50) NOT NULL`: Loại hành động (`AUTO_ASSIGN`, `MANUAL_ASSIGN`, `REASSIGN`).
+  - `reason VARCHAR(255)`: Lý do nghiệp vụ hoặc nguyên nhân thực hiện phân công / đổi tài xế.
+  - `performed_by VARCHAR(100) NOT NULL`: Người thực hiện (`SYSTEM` đối với auto-assignment hoặc username/ID của nhân viên điều hành).
+  - `created_at TIMESTAMP WITH TIME ZONE NOT NULL`: Mốc thời gian chính xác của hành động (có index phục vụ sắp xếp thời gian).
+- **Thực Thể `AssignmentHistory` & Panache Repository**:
+  - Tự động sinh `id` (UUID) và gán `created_at` thông qua JPA `@PrePersist`.
+  - Repository `AssignmentHistoryRepository` cung cấp phương thức `findByOrderIdOrderByCreatedAtAsc(String orderId)` để bảo đảm dữ liệu truy xuất luôn theo trình tự thời gian tăng dần (`createdAt ASC`).
+
+### 2. Tích Hợp Non-intrusive Vào Các Điểm Phát Sinh Biến Động
+Việc lưu lịch sử được tích hợp nguyên khối trong cùng một giao dịch cơ sở dữ liệu (`@Transactional`) với bản ghi `assignments`, đảm bảo tính nhất quán dữ liệu (Atomic Consistency):
+- **Auto-Assignment (PB-031)**: Khi hệ thống tự động tìm được Driver phù hợp nhất từ pipeline, ghi nhận lịch sử với `action_type = AUTO_ASSIGN`, `performed_by = "SYSTEM"`, `previous_driver_id = null`.
+- **Manual Assignment (PB-035)**: Khi Operations chỉ định tài xế thủ công cho đơn chưa gán, ghi nhận với `action_type = MANUAL_ASSIGN`, `performed_by = operator.username`, `reason = request.notes`.
+- **Reassign Driver (PB-036)**: Khi Operations đổi tài xế, ghi nhận với `action_type = REASSIGN`, `performed_by = operator.username`, `previous_driver_id = currentDriverId`, `new_driver_id = newDriverId`, `reason = request.reason`.
+- **Direct Creation / Assignment**: Hỗ trợ ghi nhận lịch sử khi tạo assignment mới trực tiếp hoặc chỉ định tài xế qua service methods.
+
+### 3. REST API Truy Vết Lịch Sử Assignment (History Query Endpoints)
+- **Endpoints**:
+  - `GET /assignments/{orderId}/history`
+  - `GET /api/assignments/{orderId}/history`
+  - `GET /api/shipments/assignments/{orderId}/history` (hỗ trợ routing qua API Gateway Vert.x Reverse Proxy)
+- **Xác Thực & Phân Quyền (RBAC)**: Yêu cầu Header `Authorization: Bearer <token>` với vai trò `DISPATCHER` hoặc `ADMIN`. Trả về `401 Unauthorized` nếu thiếu/sai token, `403 Forbidden` nếu là `CUSTOMER` hoặc `DRIVER`.
+- **Thứ Tự Dữ Liệu**: Luôn sắp xếp theo thứ tự thời gian tăng dần (`createdAt ASC`), phản ánh toàn bộ chuỗi biến động (ví dụ: `AUTO_ASSIGN` -> `REASSIGN` -> `REASSIGN`).
+- **Success Response (`200 OK`)**:
+  ```json
+  {
+    "success": true,
+    "message": "Assignment history retrieved successfully",
+    "data": [
+      {
+        "id": "e6a0d24e-4b77-4c3d-bc67-3306dbfc5891",
+        "orderId": "ORD-12345",
+        "assignmentId": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+        "previousDriverId": null,
+        "newDriverId": "DRV-001",
+        "actionType": "AUTO_ASSIGN",
+        "reason": "Auto assignment based on driver scoring and eligibility",
+        "performedBy": "SYSTEM",
+        "createdAt": "2026-10-20T08:00:00Z"
+      },
+      {
+        "id": "f7b1e35f-5c88-4d4e-cd78-4417ec0d6902",
+        "orderId": "ORD-12345",
+        "assignmentId": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+        "previousDriverId": "DRV-001",
+        "newDriverId": "DRV-002",
+        "actionType": "REASSIGN",
+        "reason": "Vehicle breakdown",
+        "performedBy": "dispatcher1",
+        "createdAt": "2026-10-20T08:45:00Z"
+      }
+    ]
+  }
+  ```
+
+---
+
 ## Roadmap
 
 | PB Item | Scope | Status |
@@ -1556,7 +1955,19 @@ Indexes:
 | **PB-023** | Order Management: Publish OrderCreated từ Outbox sang Kafka, ACK verification, retry & concurrency control | ✅ Completed |
 | **PB-024** | Dispatching & Assignment: Consumer xử lý OrderCreated tại Assignment Service, validation, ACK/NACK & idempotency | ✅ Completed |
 | **PB-025** | Dispatching & Assignment: Idempotent Consumer & Inbox Pattern (`inbox_events`), Atomic Tx & Race Condition resolution | ✅ Completed |
-| **PB-026+** | Dispatching & Driver Selection: Lọc driver khả dụng, tính toán khoảng cách & dispatching flow | ⏳ Planned |
+| **PB-026** | Dispatching & Assignment: Lấy danh sách Driver eligible, khung Eligibility Pipeline & Fail-safe candidate retrieval | ✅ Completed |
+| **PB-027** | Dispatching & Driver Selection: Lọc Driver theo availability, operational status & readiness | ✅ Completed |
+| **PB-028** | Dispatching & Driver Selection: Lọc Driver theo workload, giới hạn cứng/mềm, phạt ưu tiên & thưởng nhàn rỗi | ✅ Completed |
+| **PB-029** | Dispatching & Driver Selection: Tính proximity tới pickup bằng công thức Haversine, kiểm tra độ mới vị trí | ✅ Completed |
+| **PB-030** | Dispatching & Driver Selection: Chọn Driver phù hợp nhất, chấm điểm tổng hợp, tie-breaker & hoàn tất phân công | ✅ Completed |
+| **PB-031** | Dispatching & Assignment: Tạo assignment tại Assignment Service, trường assigned_at & ràng buộc active duy nhất | ✅ Completed |
+| **PB-032** | Dispatching & Assignment: Publish DriverAssigned event tại Assignment Service qua topic logistics.shipment.events | ✅ Completed |
+| **PB-033** | Dispatching & Assignment: Xử lý fallback không có driver phù hợp, trạng thái UNASSIGNED & unassigned_reason | ✅ Completed |
+| **PB-034** | Dispatching & Assignment: API cho phép Operations xem danh sách Order chưa được assign tại Assignment Service | ✅ Completed |
+| **PB-035** | Dispatching & Assignment: Chức năng Operations manual assign tại Assignment Service, RBAC & event broadcast | ✅ Completed |
+| **PB-036** | Dispatching & Assignment: Chức năng Operations reassign tại Assignment Service, audit trail & workload balance | ✅ Completed |
+| **PB-037** | Dispatching & Assignment: Lưu assignment history tại Assignment Service, audit trail & REST API | ✅ Completed |
+
 
 
 
