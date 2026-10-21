@@ -1,0 +1,17 @@
+databaseChangeLog:
+  - changeSet:
+      id: 012-add-failure-fields-to-assignments
+      author: logistics-team
+      changes:
+        - addColumn:
+            tableName: assignments
+            columns:
+              - column:
+                  name: failed_at
+                  type: TIMESTAMP WITH TIME ZONE
+              - column:
+                  name: failure_reason
+                  type: VARCHAR(255)
+              - column:
+                  name: failure_notes
+                  type: VARCHAR(255)

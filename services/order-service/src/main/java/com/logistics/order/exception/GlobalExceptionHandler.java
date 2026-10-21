@@ -71,6 +71,19 @@ public class GlobalExceptionHandler {
     }
 
     @Provider
+    public static class IllegalStateExceptionMapper implements ExceptionMapper<IllegalStateException> {
+        @Override
+        public Response toResponse(IllegalStateException exception) {
+            log.warn("Illegal state: {}", exception.getMessage());
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .type(MediaType.APPLICATION_JSON)
+                    .entity(ApiResponse.error(exception.getMessage()))
+                    .build();
+        }
+    }
+
+
+    @Provider
     public static class OrderNotFoundMapper implements ExceptionMapper<OrderNotFoundException> {
         @Override
         public Response toResponse(OrderNotFoundException exception) {
@@ -105,4 +118,17 @@ public class GlobalExceptionHandler {
                     .build();
         }
     }
+
+    @Provider
+    public static class TrackingServiceUnavailableMapper implements ExceptionMapper<TrackingServiceUnavailableException> {
+        @Override
+        public Response toResponse(TrackingServiceUnavailableException exception) {
+            log.error("Tracking service unavailable: {}", exception.getMessage());
+            return Response.status(Response.Status.SERVICE_UNAVAILABLE)
+                    .type(MediaType.APPLICATION_JSON)
+                    .entity(ApiResponse.error(exception.getMessage()))
+                    .build();
+        }
+    }
 }
+

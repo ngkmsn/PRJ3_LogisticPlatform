@@ -41,6 +41,16 @@ public class ApiOrderResource {
         return orderController.getOrderDetails(authHeader, id);
     }
 
+    @GET
+    @Path("/{id}/tracking")
+    public Response getOrderTracking(
+            @HeaderParam("Authorization") String authHeader,
+            @jakarta.ws.rs.PathParam("id") String id,
+            @jakarta.ws.rs.QueryParam("allowStale") @jakarta.ws.rs.DefaultValue("false") boolean allowStale) {
+        return orderController.getOrderTracking(authHeader, id, allowStale);
+    }
+
+
     @POST
     public Response createOrder(
             @HeaderParam("Authorization") String authHeader,

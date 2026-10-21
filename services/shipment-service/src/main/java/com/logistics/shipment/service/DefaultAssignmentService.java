@@ -4,7 +4,10 @@ import com.logistics.common.security.AuthPrincipal;
 import com.logistics.common.security.JwtTokenProvider;
 import com.logistics.common.security.Role;
 import com.logistics.shipment.dto.AssignmentHistoryDto;
+import com.logistics.shipment.dto.ConfirmPickupRequest;
 import com.logistics.shipment.dto.CreateAssignmentRequest;
+import com.logistics.shipment.dto.DriverOrderDto;
+import com.logistics.shipment.dto.FailedOrderDto;
 import com.logistics.shipment.dto.ManualAssignDriverRequest;
 import com.logistics.shipment.dto.OrderCreatedPayload;
 import com.logistics.shipment.dto.PagedResponse;
@@ -618,14 +621,15 @@ public class DefaultAssignmentService implements AssignmentService {
                 .orElseThrow(() -> new AssignmentNotFoundException("No assignment record found for orderId: " + targetOrderId));
 
         // 2. Validate Order state:
-        // Must currently be in ASSIGNED status with a non-null driverId
-        if (assignment.getStatus() != AssignmentStatus.ASSIGNED || assignment.getDriverId() == null || assignment.getDriverId().trim().isEmpty()) {
-            throw new IllegalStateException("Cannot reassign driver: order '" + targetOrderId + "' does not have an active assignment (status: " + assignment.getStatus() + ")");
+        // Terminal states (CANCELLED, DELIVERED) -> reject with IllegalStateException
+        if (assignment.getStatus() == AssignmentStatus.CANCELLED || assignment.getStatus() == AssignmentStatus.DELIVERED) {
+            throw new IllegalStateException("Cannot reassign driver for order in terminal status: " + assignment.getStatus());
         }
 
-        // Final state (CANCELLED, FAILED) -> reject with IllegalStateException
-        if (assignment.getStatus() == AssignmentStatus.CANCELLED || assignment.getStatus() == AssignmentStatus.FAILED) {
-            throw new IllegalStateException("Cannot reassign driver for order in final status: " + assignment.getStatus());
+        // Must currently be in ASSIGNED or FAILED status with a non-null driverId
+        if ((assignment.getStatus() != AssignmentStatus.ASSIGNED && assignment.getStatus() != AssignmentStatus.FAILED)
+                || assignment.getDriverId() == null || assignment.getDriverId().trim().isEmpty()) {
+            throw new IllegalStateException("Cannot reassign driver: order '" + targetOrderId + "' does not have an active assignment (status: " + assignment.getStatus() + ")");
         }
 
         String previousDriverId = assignment.getDriverId().trim();
@@ -645,6 +649,7 @@ public class DefaultAssignmentService implements AssignmentService {
 
         // 5. Transactional update of Assignment
         Instant now = Instant.now();
+        assignment.setStatus(AssignmentStatus.ASSIGNED);
         assignment.setPreviousDriverId(previousDriverId);
         assignment.setDriverId(newDriverId);
         assignment.setReassignReason(request.getReason() != null ? request.getReason().trim() : null);
@@ -655,6 +660,23 @@ public class DefaultAssignmentService implements AssignmentService {
         String operatorIdentifier = operator.getUsername() != null ? operator.getUsername() : operator.getUserId();
         assignment.setReassignedBy(operatorIdentifier);
         assignment.setAssignedBy(operatorIdentifier);
+
+        // Reset transit & pickup state so new driver starts pickup cleanly
+        assignment.setPickedUpAt(null);
+        assignment.setPickupNotes(null);
+        assignment.setTransitStartedAt(null);
+        assignment.setTransitNotes(null);
+
+        // If previously failed, preserve failure context in notes and clear failure flags
+        if (assignment.getFailureReason() != null) {
+            String failureContext = "[Previously Failed: " + assignment.getFailureReason() +
+                    (assignment.getFailureNotes() != null ? " - " + assignment.getFailureNotes() : "") + "]";
+            String existingNotes = assignment.getNotes() != null ? assignment.getNotes() + "; " : "";
+            assignment.setNotes(existingNotes + failureContext);
+        }
+        assignment.setFailedAt(null);
+        assignment.setFailureReason(null);
+        assignment.setFailureNotes(null);
 
         if (request.getNotes() != null && !request.getNotes().trim().isEmpty()) {
             String existingNotes = assignment.getNotes() != null ? assignment.getNotes() + "; " : "";
@@ -732,4 +754,526 @@ public class DefaultAssignmentService implements AssignmentService {
                 .map(AssignmentHistoryDto::from)
                 .collect(Collectors.toList());
     }
+
+    public AuthPrincipal resolveAuthenticatedDriver(String authHeader, String action) {
+        if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+            log.warn("Authentication failed: missing or invalid Authorization header");
+            throw new BadCredentialsException("Missing or invalid Authorization header");
+        }
+
+        String token = authHeader.substring(7).trim();
+        if (jwtTokenProvider == null || !jwtTokenProvider.validateToken(token)) {
+            log.warn("Authentication failed: token is invalid or expired");
+            throw new BadCredentialsException("Token is invalid or expired");
+        }
+
+        AuthPrincipal principal = AuthPrincipal.fromJwtToken(token, jwtTokenProvider);
+        if (principal == null) {
+            throw new BadCredentialsException("Token identity could not be verified");
+        }
+
+        if (principal.getRole() != Role.DRIVER) {
+            log.warn("Access denied: caller role '{}' is not DRIVER for {}", principal.getRole(), action);
+            throw new AccessDeniedException("Access denied: Only drivers are permitted to " + action);
+        }
+
+        return principal;
+    }
+
+    @Override
+    public PagedResponse<DriverOrderDto> getDriverAssignedOrders(
+            String authHeader,
+            int page,
+            int size,
+            String statusFilter) {
+        AuthPrincipal driver = resolveAuthenticatedDriver(authHeader, "view assigned orders");
+        String userId = driver.getUserId();
+
+        String driverProfileId = null;
+        if (driverClient != null) {
+            try {
+                Optional<EligibleDriver> driverOpt = driverClient.findDriverByUserId(userId);
+                if (driverOpt.isEmpty()) {
+                    driverOpt = driverClient.findDriverById(userId);
+                }
+                if (driverOpt.isPresent()) {
+                    driverProfileId = driverOpt.get().getDriverId();
+                }
+            } catch (Exception e) {
+                log.warn("Failed to resolve driver profile from driverClient for userId '{}': {}", userId, e.getMessage());
+            }
+        }
+
+        AssignmentStatus status = null;
+        if (statusFilter != null && !statusFilter.trim().isEmpty()) {
+            try {
+                status = AssignmentStatus.valueOf(statusFilter.trim().toUpperCase());
+            } catch (IllegalArgumentException e) {
+                log.warn("Invalid assignment status filter provided: '{}'", statusFilter);
+                throw new IllegalArgumentException("Invalid assignment status: " + statusFilter);
+            }
+        }
+
+        PagedResponse<Assignment> pagedAssignments = assignmentRepository.findAssignedOrdersByDriver(
+                driverProfileId != null ? driverProfileId : userId,
+                userId,
+                status,
+                page,
+                size
+        );
+
+        List<DriverOrderDto> dtos = pagedAssignments.getContent().stream()
+                .map(DriverOrderDto::from)
+                .collect(Collectors.toList());
+
+        log.info("Driver '{}' (profileId='{}') retrieved {} assigned orders (page={}, size={}, totalElements={})",
+                userId, driverProfileId, dtos.size(), pagedAssignments.getPage(), pagedAssignments.getSize(), pagedAssignments.getTotalElements());
+
+        return new PagedResponse<>(dtos, pagedAssignments.getPage(), pagedAssignments.getSize(),
+                pagedAssignments.getTotalElements(), pagedAssignments.getTotalPages());
+    }
+
+    @Override
+    @Transactional
+    public Assignment confirmPickup(String authHeader, String orderId, ConfirmPickupRequest request) {
+        AuthPrincipal driver = resolveAuthenticatedDriver(authHeader, "confirm order pickup");
+        String userId = driver.getUserId();
+
+        if (orderId == null || orderId.trim().isEmpty()) {
+            throw new IllegalArgumentException("orderId must not be null or empty");
+        }
+
+        String targetOrderId = orderId.trim();
+
+        // 1. Find assignment
+        Assignment assignment = assignmentRepository.findByOrderId(targetOrderId)
+                .orElseThrow(() -> new AssignmentNotFoundException("No assignment record found for orderId: " + targetOrderId));
+
+        // 2. Resolve Driver profile ID to match against assignment.driverId
+        String driverProfileId = null;
+        if (driverClient != null) {
+            try {
+                Optional<EligibleDriver> driverOpt = driverClient.findDriverByUserId(userId);
+                if (driverOpt.isEmpty()) {
+                    driverOpt = driverClient.findDriverById(userId);
+                }
+                if (driverOpt.isPresent()) {
+                    driverProfileId = driverOpt.get().getDriverId();
+                }
+            } catch (Exception e) {
+                log.warn("Failed to resolve driver profile from driverClient: {}", e.getMessage());
+            }
+        }
+
+        // 3. Ownership check: Must be assigned to this driver
+        String assignedDriverId = assignment.getDriverId();
+        boolean isOwner = (assignedDriverId != null) &&
+                (assignedDriverId.equalsIgnoreCase(userId) ||
+                 (driverProfileId != null && assignedDriverId.equalsIgnoreCase(driverProfileId)));
+
+        if (!isOwner) {
+            log.warn("Access denied: Driver '{}' (profileId='{}') is not the assigned driver ('{}') for order '{}'",
+                    userId, driverProfileId, assignedDriverId, targetOrderId);
+            throw new AccessDeniedException("Access denied: You are not the assigned driver for order '" + targetOrderId + "'");
+        }
+
+        // 4. State validation & Idempotency check:
+        // If already PICKED_UP, handle idempotently (return current assignment without re-emitting events)
+        if (assignment.getStatus() == AssignmentStatus.PICKED_UP) {
+            log.info("Order '{}' is already in PICKED_UP status. Returning idempotently.", targetOrderId);
+            return assignment;
+        }
+
+        // Must be in ASSIGNED status
+        if (assignment.getStatus() != AssignmentStatus.ASSIGNED) {
+            log.warn("Invalid pickup transition: Order '{}' is in status '{}', expected ASSIGNED",
+                    targetOrderId, assignment.getStatus());
+            throw new IllegalStateException("Cannot confirm pickup: Order '" + targetOrderId + "' is in status '"
+                    + assignment.getStatus() + "', expected ASSIGNED");
+        }
+
+        // 5. Update Assignment state
+        Instant now = Instant.now();
+        assignment.setStatus(AssignmentStatus.PICKED_UP);
+        assignment.setPickedUpAt(now);
+        assignment.setUpdatedAt(now);
+        if (request != null && request.getNotes() != null && !request.getNotes().trim().isEmpty()) {
+            assignment.setPickupNotes(request.getNotes().trim());
+        }
+
+        assignmentRepository.persist(assignment);
+
+        // 6. Record audit history
+        String pickupNotes = (request != null && request.getNotes() != null && !request.getNotes().trim().isEmpty())
+                ? request.getNotes().trim() : "Driver confirmed pickup";
+        recordHistory(
+                targetOrderId,
+                assignment.getId(),
+                assignment.getDriverId(),
+                assignment.getDriverId(),
+                AssignmentActionType.PICKUP,
+                pickupNotes,
+                driver.getUsername() != null ? driver.getUsername() : userId
+        );
+
+        // 7. Publish domain event
+        if (eventPublisher != null) {
+            try {
+                eventPublisher.publishOrderPickedUp(assignment);
+            } catch (Exception e) {
+                log.error("Failed to broadcast ORDER_PICKED_UP event for orderId '{}': {}",
+                        targetOrderId, e.getMessage(), e);
+            }
+        }
+
+        log.info("Driver '{}' successfully confirmed pickup for order '{}' at {}",
+                userId, targetOrderId, now);
+
+        return assignment;
+    }
+
+    @Override
+    @Transactional
+    public Assignment startTransit(String authHeader, String orderId, com.logistics.shipment.dto.StartTransitRequest request) {
+        AuthPrincipal driver = resolveAuthenticatedDriver(authHeader, "start order transit");
+        String userId = driver.getUserId();
+
+        if (orderId == null || orderId.trim().isEmpty()) {
+            throw new IllegalArgumentException("orderId must not be null or empty");
+        }
+
+        String targetOrderId = orderId.trim();
+
+        // 1. Find assignment
+        Assignment assignment = assignmentRepository.findByOrderId(targetOrderId)
+                .orElseThrow(() -> new AssignmentNotFoundException("No assignment record found for orderId: " + targetOrderId));
+
+        // 2. Resolve Driver profile ID to match against assignment.driverId
+        String driverProfileId = null;
+        if (driverClient != null) {
+            try {
+                Optional<EligibleDriver> driverOpt = driverClient.findDriverByUserId(userId);
+                if (driverOpt.isEmpty()) {
+                    driverOpt = driverClient.findDriverById(userId);
+                }
+                if (driverOpt.isPresent()) {
+                    driverProfileId = driverOpt.get().getDriverId();
+                }
+            } catch (Exception e) {
+                log.warn("Failed to resolve driver profile from driverClient: {}", e.getMessage());
+            }
+        }
+
+        // 3. Ownership check: Must be assigned to this driver
+        String assignedDriverId = assignment.getDriverId();
+        boolean isOwner = (assignedDriverId != null) &&
+                (assignedDriverId.equalsIgnoreCase(userId) ||
+                 (driverProfileId != null && assignedDriverId.equalsIgnoreCase(driverProfileId)));
+
+        if (!isOwner) {
+            log.warn("Access denied: Driver '{}' (profileId='{}') is not the assigned driver ('{}') for order '{}'",
+                    userId, driverProfileId, assignedDriverId, targetOrderId);
+            throw new AccessDeniedException("Access denied: You are not the assigned driver for order '" + targetOrderId + "'");
+        }
+
+        // 4. State validation & Idempotency check:
+        // If already IN_TRANSIT, handle idempotently (return current assignment without re-emitting events)
+        if (assignment.getStatus() == AssignmentStatus.IN_TRANSIT) {
+            log.info("Order '{}' is already in IN_TRANSIT status. Returning idempotently.", targetOrderId);
+            return assignment;
+        }
+
+        // Must be in PICKED_UP status
+        if (assignment.getStatus() != AssignmentStatus.PICKED_UP) {
+            log.warn("Invalid transit transition: Order '{}' is in status '{}', expected PICKED_UP",
+                    targetOrderId, assignment.getStatus());
+            throw new IllegalStateException("Cannot start transit: Order '" + targetOrderId + "' is in status '"
+                    + assignment.getStatus() + "', expected PICKED_UP");
+        }
+
+        // 5. Update Assignment state
+        Instant now = Instant.now();
+        assignment.setStatus(AssignmentStatus.IN_TRANSIT);
+        assignment.setTransitStartedAt(now);
+        assignment.setUpdatedAt(now);
+        if (request != null && request.getNotes() != null && !request.getNotes().trim().isEmpty()) {
+            assignment.setTransitNotes(request.getNotes().trim());
+        }
+
+        assignmentRepository.persist(assignment);
+
+        // 6. Record audit history
+        String transitNotes = (request != null && request.getNotes() != null && !request.getNotes().trim().isEmpty())
+                ? request.getNotes().trim() : "Driver started delivery transit";
+        recordHistory(
+                targetOrderId,
+                assignment.getId(),
+                assignment.getDriverId(),
+                assignment.getDriverId(),
+                AssignmentActionType.START_TRANSIT,
+                transitNotes,
+                driver.getUsername() != null ? driver.getUsername() : userId
+        );
+
+        // 7. Publish domain event
+        if (eventPublisher != null) {
+            try {
+                eventPublisher.publishOrderInTransit(assignment);
+            } catch (Exception e) {
+                log.error("Failed to broadcast ORDER_IN_TRANSIT event for orderId '{}': {}",
+                        targetOrderId, e.getMessage(), e);
+            }
+        }
+
+        log.info("Driver '{}' successfully started transit for order '{}' at {}",
+                userId, targetOrderId, now);
+
+        return assignment;
+    }
+
+    @Override
+    @Transactional
+    public Assignment confirmDelivery(String authHeader, String orderId, com.logistics.shipment.dto.ConfirmDeliveryRequest request) {
+        AuthPrincipal driver = resolveAuthenticatedDriver(authHeader, "confirm order delivery");
+        String userId = driver.getUserId();
+
+        if (orderId == null || orderId.trim().isEmpty()) {
+            throw new IllegalArgumentException("orderId must not be null or empty");
+        }
+
+        String targetOrderId = orderId.trim();
+
+        // 1. Find assignment
+        Assignment assignment = assignmentRepository.findByOrderId(targetOrderId)
+                .orElseThrow(() -> new AssignmentNotFoundException("No assignment record found for orderId: " + targetOrderId));
+
+        // 2. Resolve Driver profile ID to match against assignment.driverId
+        String driverProfileId = null;
+        if (driverClient != null) {
+            try {
+                Optional<EligibleDriver> driverOpt = driverClient.findDriverByUserId(userId);
+                if (driverOpt.isEmpty()) {
+                    driverOpt = driverClient.findDriverById(userId);
+                }
+                if (driverOpt.isPresent()) {
+                    driverProfileId = driverOpt.get().getDriverId();
+                }
+            } catch (Exception e) {
+                log.warn("Failed to resolve driver profile from driverClient: {}", e.getMessage());
+            }
+        }
+
+        // 3. Ownership check: Must be assigned to this driver
+        String assignedDriverId = assignment.getDriverId();
+        boolean isOwner = (assignedDriverId != null) &&
+                (assignedDriverId.equalsIgnoreCase(userId) ||
+                 (driverProfileId != null && assignedDriverId.equalsIgnoreCase(driverProfileId)));
+
+        if (!isOwner) {
+            log.warn("Access denied: Driver '{}' (profileId='{}') is not the assigned driver ('{}') for order '{}'",
+                    userId, driverProfileId, assignedDriverId, targetOrderId);
+            throw new AccessDeniedException("Access denied: You are not the assigned driver for order '" + targetOrderId + "'");
+        }
+
+        // 4. State validation & Idempotency check:
+        // If already DELIVERED, handle idempotently (return current assignment without re-emitting events)
+        if (assignment.getStatus() == AssignmentStatus.DELIVERED) {
+            log.info("Order '{}' is already in DELIVERED status. Returning idempotently.", targetOrderId);
+            return assignment;
+        }
+
+        // Must be in IN_TRANSIT status
+        if (assignment.getStatus() != AssignmentStatus.IN_TRANSIT) {
+            log.warn("Invalid delivery transition: Order '{}' is in status '{}', expected IN_TRANSIT",
+                    targetOrderId, assignment.getStatus());
+            throw new IllegalStateException("Cannot confirm delivery: Order '" + targetOrderId + "' is in status '"
+                    + assignment.getStatus() + "', expected IN_TRANSIT");
+        }
+
+        // 5. Update Assignment state
+        Instant now = Instant.now();
+        assignment.setStatus(AssignmentStatus.DELIVERED);
+        assignment.setDeliveredAt(now);
+        assignment.setUpdatedAt(now);
+        if (request != null && request.getNotes() != null && !request.getNotes().trim().isEmpty()) {
+            assignment.setDeliveryNotes(request.getNotes().trim());
+        }
+        if (request != null && request.getProofOfDelivery() != null && !request.getProofOfDelivery().trim().isEmpty()) {
+            assignment.setProofOfDelivery(request.getProofOfDelivery().trim());
+        }
+
+        assignmentRepository.persist(assignment);
+
+        // 6. Record audit history
+        String deliveryNotes = (request != null && request.getNotes() != null && !request.getNotes().trim().isEmpty())
+                ? request.getNotes().trim() : "Driver confirmed delivery";
+        recordHistory(
+                targetOrderId,
+                assignment.getId(),
+                assignment.getDriverId(),
+                assignment.getDriverId(),
+                AssignmentActionType.DELIVER,
+                deliveryNotes,
+                driver.getUsername() != null ? driver.getUsername() : userId
+        );
+
+        // 7. Publish domain event
+        if (eventPublisher != null) {
+            try {
+                eventPublisher.publishOrderDelivered(assignment);
+            } catch (Exception e) {
+                log.error("Failed to broadcast ORDER_DELIVERED event for orderId '{}': {}",
+                        targetOrderId, e.getMessage(), e);
+            }
+        }
+
+        log.info("Driver '{}' successfully confirmed delivery for order '{}' at {}",
+                userId, targetOrderId, now);
+
+        return assignment;
+    }
+
+    @Override
+    @Transactional
+    public Assignment reportDeliveryFailure(String authHeader, String orderId, com.logistics.shipment.dto.ReportDeliveryFailureRequest request) {
+        AuthPrincipal driver = resolveAuthenticatedDriver(authHeader, "report delivery failure");
+        String userId = driver.getUserId();
+
+        if (orderId == null || orderId.trim().isEmpty()) {
+            throw new IllegalArgumentException("orderId must not be null or empty");
+        }
+
+        String targetOrderId = orderId.trim();
+
+        // 1. Validate failure reason
+        String failureReason = request != null ? request.getEffectiveReason() : null;
+        if (failureReason == null || failureReason.trim().isEmpty()) {
+            throw new IllegalArgumentException("Failure reason must not be null or empty");
+        }
+        if (failureReason.trim().length() < 3) {
+            throw new IllegalArgumentException("Failure reason must be at least 3 characters");
+        }
+
+        // 2. Find assignment
+        Assignment assignment = assignmentRepository.findByOrderId(targetOrderId)
+                .orElseThrow(() -> new AssignmentNotFoundException("No assignment record found for orderId: " + targetOrderId));
+
+        // 3. Resolve Driver profile ID to match against assignment.driverId
+        String driverProfileId = null;
+        if (driverClient != null) {
+            try {
+                Optional<EligibleDriver> driverOpt = driverClient.findDriverByUserId(userId);
+                if (driverOpt.isEmpty()) {
+                    driverOpt = driverClient.findDriverById(userId);
+                }
+                if (driverOpt.isPresent()) {
+                    driverProfileId = driverOpt.get().getDriverId();
+                }
+            } catch (Exception e) {
+                log.warn("Failed to resolve driver profile from driverClient: {}", e.getMessage());
+            }
+        }
+
+        // 4. Ownership check: Must be assigned to this driver
+        String assignedDriverId = assignment.getDriverId();
+        boolean isOwner = (assignedDriverId != null) &&
+                (assignedDriverId.equalsIgnoreCase(userId) ||
+                 (driverProfileId != null && assignedDriverId.equalsIgnoreCase(driverProfileId)));
+
+        if (!isOwner) {
+            log.warn("Access denied: Driver '{}' (profileId='{}') is not the assigned driver ('{}') for order '{}'",
+                    userId, driverProfileId, assignedDriverId, targetOrderId);
+            throw new AccessDeniedException("Access denied: You are not the assigned driver for order '" + targetOrderId + "'");
+        }
+
+        // 5. State validation & Idempotency check:
+        // If already FAILED, handle idempotently (return current assignment without re-emitting events)
+        if (assignment.getStatus() == AssignmentStatus.FAILED) {
+            log.info("Order '{}' is already in FAILED status. Returning idempotently.", targetOrderId);
+            return assignment;
+        }
+
+        // Must be in active delivery status: IN_TRANSIT or PICKED_UP
+        if (assignment.getStatus() != AssignmentStatus.IN_TRANSIT && assignment.getStatus() != AssignmentStatus.PICKED_UP) {
+            log.warn("Invalid delivery failure transition: Order '{}' is in status '{}', expected IN_TRANSIT or PICKED_UP",
+                    targetOrderId, assignment.getStatus());
+            throw new IllegalStateException("Cannot report delivery failure: Order '" + targetOrderId + "' is in status '"
+                    + assignment.getStatus() + "', expected IN_TRANSIT or PICKED_UP");
+        }
+
+        // 6. Update Assignment state
+        Instant now = Instant.now();
+        assignment.setStatus(AssignmentStatus.FAILED);
+        assignment.setFailedAt(now);
+        assignment.setFailureReason(failureReason.trim());
+        if (request != null && request.getNotes() != null && !request.getNotes().trim().isEmpty()) {
+            assignment.setFailureNotes(request.getNotes().trim());
+        }
+        assignment.setUpdatedAt(now);
+
+        assignmentRepository.persist(assignment);
+
+        // 7. Record audit history
+        String failureHistoryReason = failureReason.trim() + (request != null && request.getNotes() != null && !request.getNotes().trim().isEmpty()
+                ? " - " + request.getNotes().trim() : "");
+        recordHistory(
+                targetOrderId,
+                assignment.getId(),
+                assignment.getDriverId(),
+                assignment.getDriverId(),
+                AssignmentActionType.DELIVERY_FAILED,
+                failureHistoryReason,
+                driver.getUsername() != null ? driver.getUsername() : userId
+        );
+
+        // 8. Publish domain event
+        if (eventPublisher != null) {
+            try {
+                eventPublisher.publishOrderFailed(assignment);
+            } catch (Exception e) {
+                log.error("Failed to broadcast ORDER_FAILED event for orderId '{}': {}",
+                        targetOrderId, e.getMessage(), e);
+            }
+        }
+
+        log.info("Driver '{}' successfully reported delivery failure for order '{}' (reason: '{}') at {}",
+                userId, targetOrderId, failureReason.trim(), now);
+
+        return assignment;
+    }
+
+    @Override
+    public PagedResponse<FailedOrderDto> getFailedOrders(String authHeader, int page, int size, String sort) {
+        resolveAuthenticatedOperations(authHeader, "view failed orders");
+
+        PagedResponse<Assignment> pagedAssignments = assignmentRepository.findFailed(page, size, sort);
+        List<FailedOrderDto> dtos = pagedAssignments.getContent().stream()
+                .map(FailedOrderDto::from)
+                .collect(Collectors.toList());
+
+        return new PagedResponse<>(
+                dtos,
+                pagedAssignments.getPage(),
+                pagedAssignments.getSize(),
+                pagedAssignments.getTotalElements(),
+                pagedAssignments.getTotalPages()
+        );
+    }
+
+    @Override
+    public FailedOrderDto getFailedOrderDetail(String authHeader, String orderId) {
+        resolveAuthenticatedOperations(authHeader, "view failed order detail");
+
+        if (orderId == null || orderId.trim().isEmpty()) {
+            throw new IllegalArgumentException("orderId must not be null or empty");
+        }
+
+        Assignment assignment = assignmentRepository.findFailedByOrderId(orderId.trim())
+                .orElseThrow(() -> new AssignmentNotFoundException("No failed order found with orderId: " + orderId));
+
+        return FailedOrderDto.from(assignment);
+    }
 }
+
+
+

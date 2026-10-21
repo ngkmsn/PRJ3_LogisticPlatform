@@ -1,0 +1,14 @@
+databaseChangeLog:
+  - changeSet:
+      id: 009-add-pickup-fields-to-assignments
+      author: logistics-team
+      changes:
+        - addColumn:
+            tableName: assignments
+            columns:
+              - column:
+                  name: picked_up_at
+                  type: TIMESTAMP WITH TIME ZONE
+              - column:
+                  name: pickup_notes
+                  type: VARCHAR(255)

@@ -124,4 +124,121 @@ public interface AssignmentService {
      * @return list of AssignmentHistoryDto sorted by createdAt ascending
      */
     java.util.List<com.logistics.shipment.dto.AssignmentHistoryDto> getAssignmentHistory(String authHeader, String orderId);
+
+    /**
+     * Retrieves paged list of orders assigned to the currently authenticated driver (PB-038).
+     * Validates that caller has DRIVER role, resolves driver identity securely from token,
+     * and strictly returns only assignments belonging to this driver.
+     *
+     * @param authHeader Bearer token
+     * @param page       zero-based page index
+     * @param size       page size
+     * @param status     optional assignment status filter
+     * @return paged response of DriverOrderDto
+     */
+    com.logistics.shipment.dto.PagedResponse<com.logistics.shipment.dto.DriverOrderDto> getDriverAssignedOrders(
+            String authHeader,
+            int page,
+            int size,
+            String status);
+
+    /**
+     * Confirms that the assigned driver has picked up the package at the pickup location (PB-039).
+     * Validates that the caller has DRIVER role, is the currently assigned driver for the order,
+     * the order is in ASSIGNED status (or already PICKED_UP for idempotent handling),
+     * transitions status to PICKED_UP, records pickup timestamp and notes, logs audit history,
+     * and broadcasts ORDER_PICKED_UP domain event.
+     *
+     * @param authHeader Bearer token
+     * @param orderId    order identifier
+     * @param request    confirm pickup request with optional notes
+     * @return updated Assignment
+     */
+    Assignment confirmPickup(
+            String authHeader,
+            String orderId,
+            com.logistics.shipment.dto.ConfirmPickupRequest request);
+
+    /**
+     * Confirms that the assigned driver has started transit/delivery towards destination (PB-040).
+     * Validates that the caller has DRIVER role, is the currently assigned driver for the order,
+     * the order is in PICKED_UP status (or already IN_TRANSIT for idempotent handling),
+     * transitions status to IN_TRANSIT, records transit timestamp and notes, logs audit history,
+     * and broadcasts ORDER_IN_TRANSIT domain event.
+     *
+     * @param authHeader Bearer token
+     * @param orderId    order identifier
+     * @param request    start transit request with optional notes
+     * @return updated Assignment
+     */
+    Assignment startTransit(
+            String authHeader,
+            String orderId,
+            com.logistics.shipment.dto.StartTransitRequest request);
+
+    /**
+     * Confirms that the assigned driver has successfully delivered the order to the recipient (PB-041).
+     * Validates that the caller has DRIVER role, is the currently assigned driver for the order,
+     * the order is in IN_TRANSIT status (or already DELIVERED for idempotent handling),
+     * transitions status to DELIVERED, records delivered_at timestamp, delivery notes, proof of delivery,
+     * logs audit history (DELIVER), and broadcasts ORDER_DELIVERED domain event.
+     *
+     * @param authHeader Bearer token
+     * @param orderId    order identifier
+     * @param request    confirm delivery request with optional notes and proof of delivery
+     * @return updated Assignment
+     */
+    Assignment confirmDelivery(
+            String authHeader,
+            String orderId,
+            com.logistics.shipment.dto.ConfirmDeliveryRequest request);
+
+    /**
+     * Reports that delivery of the order has failed (PB-042).
+     * Validates that the caller has DRIVER role, is the currently assigned driver for the order,
+     * the failure reason is non-empty, and the order is in an active delivery status
+     * (IN_TRANSIT or PICKED_UP, or already FAILED for idempotent handling).
+     * Transitions status to FAILED, records failed_at timestamp, failure_reason, failure_notes,
+     * logs audit history (DELIVERY_FAILED), and broadcasts ORDER_FAILED domain event.
+     *
+     * @param authHeader Bearer token
+     * @param orderId    order identifier
+     * @param request    report delivery failure request with required failure reason
+     * @return updated Assignment
+     */
+    Assignment reportDeliveryFailure(
+            String authHeader,
+            String orderId,
+            com.logistics.shipment.dto.ReportDeliveryFailureRequest request);
+
+    /**
+     * Retrieves a paginated list of orders currently in FAILED status for Operations review (PB-043).
+     * Validates that the caller has Operations role (ADMIN or DISPATCHER).
+     *
+     * @param authHeader Bearer token
+     * @param page       zero-based page index
+     * @param size       page size
+     * @param sort       sort order ("newest_first", "oldest_first")
+     * @return paginated response containing failed orders with failure reasons and timestamps
+     */
+    com.logistics.shipment.dto.PagedResponse<com.logistics.shipment.dto.FailedOrderDto> getFailedOrders(
+            String authHeader,
+            int page,
+            int size,
+            String sort);
+
+    /**
+     * Retrieves detailed information of a specific FAILED order for Operations review (PB-043).
+     * Validates that the caller has Operations role (ADMIN or DISPATCHER).
+     *
+     * @param authHeader Bearer token
+     * @param orderId    order identifier
+     * @return failed order details including failure reasons, notes, previous driver, and timestamps
+     */
+    com.logistics.shipment.dto.FailedOrderDto getFailedOrderDetail(
+            String authHeader,
+            String orderId);
 }
+
+
+

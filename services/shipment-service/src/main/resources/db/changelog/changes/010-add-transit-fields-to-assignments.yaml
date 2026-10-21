@@ -1,0 +1,14 @@
+databaseChangeLog:
+  - changeSet:
+      id: 010-add-transit-fields-to-assignments
+      author: logistics-team
+      changes:
+        - addColumn:
+            tableName: assignments
+            columns:
+              - column:
+                  name: transit_started_at
+                  type: TIMESTAMP WITH TIME ZONE
+              - column:
+                  name: transit_notes
+                  type: VARCHAR(255)

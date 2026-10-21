@@ -27,4 +27,24 @@ public interface DriverClient {
      * @return Optional containing EligibleDriver if found and active, empty otherwise
      */
     Optional<EligibleDriver> findDriverById(String driverId);
+
+    /**
+     * Finds and validates a driver by their user account identifier.
+     *
+     * @param userId user account identifier
+     * @return Optional containing EligibleDriver if found and active, empty otherwise
+     */
+    default Optional<EligibleDriver> findDriverByUserId(String userId) {
+        return findDriverById(userId);
+    }
+
+    /**
+     * Retrieves all drivers from authoritative User Service for Operations monitoring (PB-046).
+     *
+     * @param authHeader authorization header with Bearer token
+     * @return list of drivers, never null
+     */
+    default List<EligibleDriver> getAllDrivers(String authHeader) {
+        return List.of();
+    }
 }

@@ -16,6 +16,10 @@ public class AssignmentHistoryRepository implements PanacheRepositoryBase<Assign
         return list("orderId = ?1 order by createdAt asc", orderId.trim());
     }
 
+    public List<AssignmentHistory> findByOrderId(String orderId) {
+        return findByOrderIdOrderByCreatedAtAsc(orderId);
+    }
+
     public List<AssignmentHistory> findByAssignmentIdOrderByCreatedAtAsc(String assignmentId) {
         if (assignmentId == null || assignmentId.trim().isEmpty()) {
             return List.of();

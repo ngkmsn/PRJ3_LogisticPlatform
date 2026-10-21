@@ -41,6 +41,24 @@ public class ApiAssignmentResource {
         return assignmentController.getUnassignedOrderDetail(authHeader, orderId);
     }
 
+    @GET
+    @Path("/failed")
+    public Response getFailedOrders(
+            @HeaderParam("Authorization") String authHeader,
+            @QueryParam("page") @DefaultValue("0") int page,
+            @QueryParam("size") @DefaultValue("10") int size,
+            @QueryParam("sort") @DefaultValue("newest_first") String sort) {
+        return assignmentController.getFailedOrders(authHeader, page, size, sort);
+    }
+
+    @GET
+    @Path("/failed/{orderId}")
+    public Response getFailedOrderDetail(
+            @HeaderParam("Authorization") String authHeader,
+            @PathParam("orderId") String orderId) {
+        return assignmentController.getFailedOrderDetail(authHeader, orderId);
+    }
+
     @jakarta.ws.rs.POST
     @Path("/{orderId}/manual-assign")
     public Response manualAssignDriver(
@@ -66,4 +84,107 @@ public class ApiAssignmentResource {
             @PathParam("orderId") String orderId) {
         return assignmentController.getAssignmentHistory(authHeader, orderId);
     }
+
+    @GET
+    @Path("/driver/orders")
+    public Response getDriverOrders(
+            @HeaderParam("Authorization") String authHeader,
+            @QueryParam("page") @DefaultValue("0") int page,
+            @QueryParam("size") @DefaultValue("10") int size,
+            @QueryParam("status") String status) {
+        return assignmentController.getDriverOrders(authHeader, page, size, status);
+    }
+
+    @GET
+    @Path("/my-orders")
+    public Response getMyOrders(
+            @HeaderParam("Authorization") String authHeader,
+            @QueryParam("page") @DefaultValue("0") int page,
+            @QueryParam("size") @DefaultValue("10") int size,
+            @QueryParam("status") String status) {
+        return assignmentController.getMyOrders(authHeader, page, size, status);
+    }
+
+    @jakarta.ws.rs.POST
+    @Path("/{orderId}/pickup")
+    public Response confirmPickup(
+            @HeaderParam("Authorization") String authHeader,
+            @PathParam("orderId") String orderId,
+            @jakarta.validation.Valid com.logistics.shipment.dto.ConfirmPickupRequest request) {
+        return assignmentController.confirmPickup(authHeader, orderId, request);
+    }
+
+    @jakarta.ws.rs.POST
+    @Path("/{orderId}/transit")
+    public Response startTransit(
+            @HeaderParam("Authorization") String authHeader,
+            @PathParam("orderId") String orderId,
+            @jakarta.validation.Valid com.logistics.shipment.dto.StartTransitRequest request) {
+        return assignmentController.startTransit(authHeader, orderId, request);
+    }
+
+    @jakarta.ws.rs.POST
+    @Path("/{orderId}/start-transit")
+    public Response startTransitAlias(
+            @HeaderParam("Authorization") String authHeader,
+            @PathParam("orderId") String orderId,
+            @jakarta.validation.Valid com.logistics.shipment.dto.StartTransitRequest request) {
+        return assignmentController.startTransit(authHeader, orderId, request);
+    }
+
+    @jakarta.ws.rs.POST
+    @Path("/{orderId}/deliver")
+    public Response confirmDelivery(
+            @HeaderParam("Authorization") String authHeader,
+            @PathParam("orderId") String orderId,
+            @jakarta.validation.Valid com.logistics.shipment.dto.ConfirmDeliveryRequest request) {
+        return assignmentController.confirmDelivery(authHeader, orderId, request);
+    }
+
+    @jakarta.ws.rs.POST
+    @Path("/{orderId}/complete-delivery")
+    public Response completeDeliveryAlias(
+            @HeaderParam("Authorization") String authHeader,
+            @PathParam("orderId") String orderId,
+            @jakarta.validation.Valid com.logistics.shipment.dto.ConfirmDeliveryRequest request) {
+        return assignmentController.confirmDelivery(authHeader, orderId, request);
+    }
+
+    @jakarta.ws.rs.POST
+    @Path("/{orderId}/delivered")
+    public Response deliveredAlias(
+            @HeaderParam("Authorization") String authHeader,
+            @PathParam("orderId") String orderId,
+            @jakarta.validation.Valid com.logistics.shipment.dto.ConfirmDeliveryRequest request) {
+        return assignmentController.confirmDelivery(authHeader, orderId, request);
+    }
+
+    @jakarta.ws.rs.POST
+    @Path("/{orderId}/fail")
+    public Response reportDeliveryFailure(
+            @HeaderParam("Authorization") String authHeader,
+            @PathParam("orderId") String orderId,
+            @jakarta.validation.Valid com.logistics.shipment.dto.ReportDeliveryFailureRequest request) {
+        return assignmentController.reportDeliveryFailure(authHeader, orderId, request);
+    }
+
+    @jakarta.ws.rs.POST
+    @Path("/{orderId}/failed")
+    public Response reportDeliveryFailedAlias(
+            @HeaderParam("Authorization") String authHeader,
+            @PathParam("orderId") String orderId,
+            @jakarta.validation.Valid com.logistics.shipment.dto.ReportDeliveryFailureRequest request) {
+        return assignmentController.reportDeliveryFailure(authHeader, orderId, request);
+    }
+
+    @jakarta.ws.rs.POST
+    @Path("/{orderId}/fail-delivery")
+    public Response reportDeliveryFailDeliveryAlias(
+            @HeaderParam("Authorization") String authHeader,
+            @PathParam("orderId") String orderId,
+            @jakarta.validation.Valid com.logistics.shipment.dto.ReportDeliveryFailureRequest request) {
+        return assignmentController.reportDeliveryFailure(authHeader, orderId, request);
+    }
 }
+
+

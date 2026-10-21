@@ -1926,6 +1926,696 @@ Việc lưu lịch sử được tích hợp nguyên khối trong cùng một gi
 
 ---
 
+## Driver Management: Driver Xem Order Được Giao (PB-038)
+
+Cung cấp API cho phép tài xế (`DRIVER`) xem danh sách các đơn hàng được phân công cho chính mình, bảo đảm cách ly dữ liệu giữa các tài xế và bảo mật các thông tin nội bộ vận hành.
+
+### 1. Phân Quyền & Xác Minh Danh Tính Tự Động (Strict Identity Resolution & RBAC)
+- **Kiểm Soát Quyền Truy Cập (RBAC)**: Chỉ duy nhất tài xế có vai trò `DRIVER` trong JWT Bearer token mới được phép truy vấn. Các vai trò khác (`CUSTOMER`, `DISPATCHER`, `ADMIN`) đều bị từ chối với `403 Forbidden`. Yêu cầu thiếu hoặc sai token bị từ chối với `401 Unauthorized`.
+- **Không Tin Cậy Tham Số Client**: Hệ thống tuyệt đối không chấp nhận `driverId` từ request params hay body. Danh tính tài xế được trích xuất an toàn từ claims của JWT (`userId`).
+- **Ánh Xạ Driver Profile Hai Chiều**: Thông qua `DriverClient.findDriverByUserId(userId)`, hệ thống đối chiếu cả ID hồ sơ tài xế (`driverProfileId`) và `userId` khi truy vấn database, đảm bảo tương thích mọi mô hình lưu trữ trong `shipment_db`.
+- **Cách Ly Dữ Liệu Tuyệt Đối**: Câu truy vấn chỉ lấy các bản ghi `assignments` có `driver_id` trùng khớp với tài xế đang đăng nhập. Driver tuyệt đối không thể xem được đơn hàng của tài xế khác.
+
+### 2. DTO An Toàn & Đọc Thuần Túy (Safe DTO & Read-only)
+- **`DriverOrderDto`**:
+  - Cung cấp đủ thông tin phục vụ giao nhận: `assignmentId`, `orderId`, `orderNumber`, `recipientName`, `recipientPhone`, `pickupAddress`, `deliveryAddress`, `totalAmount` (tiền COD), `status`, `assignedAt`, `notes`, `createdAt`.
+  - Ẩn toàn bộ dữ liệu nội bộ điều phối và nhạy cảm: `customerId`, `unassignedReason`, `reassignReason`, `reassignedBy`, `assignedBy`, `assignmentSource`, `previousDriverId`.
+- **Đọc Thuần Túy (Read-only)**: Hành động xem danh sách đơn hàng hoàn toàn không làm biến đổi trạng thái của `Order` hay `Assignment`.
+- **Trường Hợp Chưa Có Đơn**: Trả về HTTP `200 OK` với danh sách rỗng (`content: []`, `totalElements: 0`).
+
+### 3. Phân Trang & Lọc Trạng Thái
+- **Phân Trang**: Hỗ trợ chuẩn `page` (mặc định `0`) và `size` (mặc định `10`, tối đa `100`), trả về dạng `PagedResponse<DriverOrderDto>`.
+- **Lọc Trạng Thái**: Tham số `status` (ví dụ `status=ASSIGNED`). Báo lỗi `400 Bad Request` nếu truyền trạng thái không hợp lệ.
+
+### 4. REST API Endpoints
+- `GET /assignments/driver/orders` (hoặc alias `GET /assignments/my-orders`)
+- `GET /api/assignments/driver/orders`
+- `GET /api/shipments/assignments/driver/orders`
+- `GET /shipments/assignments/driver/orders` (hỗ trợ StripPrefix qua Vert.x API Gateway)
+- **Query Params**:
+  - `page`: int (mặc định 0)
+  - `size`: int (mặc định 10)
+  - `status`: String (tùy chọn, ví dụ `ASSIGNED`)
+- **Headers**: `Authorization: Bearer <driver-jwt-token>`
+- **Success Response (`200 OK`)**:
+  ```json
+  {
+    "success": true,
+    "message": "Driver assigned orders retrieved successfully",
+    "data": {
+      "content": [
+        {
+          "assignmentId": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+          "orderId": "ORD-12345",
+          "orderNumber": "ORD-20261020-001",
+          "recipientName": "Tran Van B",
+          "recipientPhone": "0912345678",
+          "pickupAddress": "123 Lê Duẩn, Quận 1, TP.HCM",
+          "deliveryAddress": "456 Nguyễn Trãi, Quận 5, TP.HCM",
+          "totalAmount": 150000.00,
+          "status": "ASSIGNED",
+          "assignedAt": "2026-10-20T08:00:00Z",
+          "notes": "Handle with care",
+          "createdAt": "2026-10-20T08:00:00Z"
+        }
+      ],
+      "page": 0,
+      "size": 10,
+      "totalElements": 1,
+      "totalPages": 1
+    }
+  }
+  ```
+
+---
+
+## Driver Management: Driver Xác Nhận Pickup (PB-039)
+
+Cung cấp API cho phép tài xế (`DRIVER`) xác nhận đã nhận hàng tại điểm pickup cho đơn hàng được phân công cho mình. Chỉ khi hành động hợp lệ được thực hiện, hệ thống mới chuyển `Assignment` sang trạng thái `PICKED_UP`, ghi nhận audit history và phát hành business event `ORDER_PICKED_UP` lên Kafka.
+
+### 1. Phân Quyền & Kiểm Tra Quyền Sở Hữu Nghiêm Ngặt (Strict RBAC & Driver Ownership)
+- **Kiểm Soát Quyền Truy Cập (RBAC)**: Chỉ duy nhất tài xế có vai trò `DRIVER` trong JWT Bearer token mới được phép thực hiện hành động này. Các vai trò khác (`CUSTOMER`, `DISPATCHER`, `ADMIN`) đều bị từ chối với `403 Forbidden`. Yêu cầu thiếu hoặc sai token bị từ chối với `401 Unauthorized`.
+- **Xác Thực Quyền Sở Hữu (Ownership Verification)**: Hệ thống kiểm tra chặt chẽ `assignment.driverId` có trùng khớp với tài xế đang đăng nhập hay không (kiểm tra cả `userId` và `driverProfileId` đã resolve). Nếu tài xế khác cố tình xác nhận đơn không được giao cho mình, hệ thống lập tức từ chối với `403 Forbidden`.
+
+### 2. Kiểm Tra Vòng Đời & Tính Bất Biến Lũy Đẳng (Lifecycle Validation & Idempotency)
+- **Hợp Lệ Cho Trạng Thái Hiện Tại**: Đơn hàng chỉ được phép chuyển trạng thái pickup khi đang ở trạng thái `ASSIGNED`. Các trạng thái không hợp lệ khác (`UNASSIGNED`, `PENDING`, `SEARCHING_DRIVER`, `CANCELLED`, `FAILED`) bị từ chối với `400 Bad Request`.
+- **Xử Lý Lũy Đẳng (Idempotency)**: Nếu tài xế bấm xác nhận nhiều lần khi đơn đã ở trạng thái `PICKED_UP`, hệ thống trả về HTTP `200 OK` an toàn, giữ nguyên mốc thời gian `picked_up_at` ban đầu, không tạo bản ghi lịch sử trùng lặp và không publish lại event lên Kafka.
+
+### 3. Cập Nhật Dữ Liệu & Audit History
+- **Database Schema**: Bổ sung các cột mới vào bảng `assignments` thông qua Liquibase changeset `009-add-pickup-fields-to-assignments.yaml`:
+  - `picked_up_at`: TIMESTAMP WITH TIME ZONE (thời điểm tài xế bấm xác nhận nhận hàng).
+  - `pickup_notes`: VARCHAR(255) (ghi chú tùy chọn từ tài xế lúc nhận hàng).
+- **Lưu Vết Lịch Sử (Audit Log)**: Ghi nhận một bản ghi mới trong bảng `assignment_histories`:
+  - `action_type`: `PICKUP`
+  - `performed_by`: Username/ID của tài xế
+  - `new_driver_id`: ID của tài xế thực hiện nhận hàng
+  - `reason`: Thông tin chi tiết kèm `pickup_notes`
+
+### 4. Phát Hành Business Event (Kafka Event Broadcast)
+- Khi xác nhận pickup thành công, hệ thống phát hành business event `ORDER_PICKED_UP` lên topic `logistics.shipment.events`:
+  - `event_id`: UUID định danh duy nhất cho event
+  - `event_type`: `"ORDER_PICKED_UP"`
+  - `timestamp`: Mốc thời gian ISO-8601
+  - `payload`: Bao gồm `orderId`, `orderNumber`, `assignmentId`, `driverId`, `pickedUpAt`, `pickupNotes`, `status: "PICKED_UP"`
+  - `partition_key`: `orderId` (đảm bảo thứ tự xử lý trên partition cho từng đơn hàng)
+
+### 5. REST API Endpoints
+- `POST /assignments/{orderId}/pickup`
+- `POST /api/assignments/{orderId}/pickup`
+- `POST /api/shipments/assignments/{orderId}/pickup`
+- `POST /shipments/assignments/{orderId}/pickup`
+- **Headers**: `Authorization: Bearer <driver-jwt-token>`, `Content-Type: application/json`
+- **Request Body (Tùy chọn)**:
+  ```json
+  {
+    "notes": "Kiện hàng nguyên vẹn, đã kiểm tra tem niêm phong"
+  }
+  ```
+- **Success Response (`200 OK`)**:
+  ```json
+  {
+    "success": true,
+    "message": "Order pickup confirmed successfully",
+    "data": {
+      "assignmentId": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+      "orderId": "ORD-12345",
+      "orderNumber": "ORD-20261020-001",
+      "recipientName": "Tran Van B",
+      "recipientPhone": "0912345678",
+      "pickupAddress": "123 Lê Duẩn, Quận 1, TP.HCM",
+      "deliveryAddress": "456 Nguyễn Trãi, Quận 5, TP.HCM",
+      "totalAmount": 150000.00,
+      "status": "PICKED_UP",
+      "assignedAt": "2026-10-20T08:00:00Z",
+      "pickedUpAt": "2026-10-20T08:30:00Z",
+      "pickupNotes": "Kiện hàng nguyên vẹn, đã kiểm tra tem niêm phong",
+      "notes": "Handle with care",
+      "createdAt": "2026-10-20T08:00:00Z"
+    }
+  }
+  ```
+
+---
+
+## Driver Management: Driver Bắt Đầu Transit (PB-040)
+
+Cung cấp API cho phép tài xế (`DRIVER`) bắt đầu quá trình giao hàng (transit) cho đơn hàng được phân công cho mình sau khi đã hoàn thành bước nhận hàng (`PICKED_UP`). Khi hành động hợp lệ được thực hiện, hệ thống chuyển `Assignment` sang trạng thái `IN_TRANSIT`, cập nhật mốc thời gian `transit_started_at`, ghi nhận audit history và phát hành business event `ORDER_IN_TRANSIT` lên Kafka.
+
+### 1. Phân Quyền & Kiểm Tra Quyền Sở Hữu Nghiêm Ngặt (Strict RBAC & Driver Ownership)
+- **Kiểm Soát Quyền Truy Cập (RBAC)**: Chỉ duy nhất tài xế có vai trò `DRIVER` trong JWT Bearer token mới được phép thực hiện hành động này. Các vai trò khác (`CUSTOMER`, `DISPATCHER`, `ADMIN`) đều bị từ chối với `403 Forbidden`. Yêu cầu thiếu hoặc sai token bị từ chối với `401 Unauthorized`.
+- **Xác Thực Quyền Sở Hữu (Ownership Verification)**: Hệ thống kiểm tra chặt chẽ `assignment.driverId` có trùng khớp với tài xế đang đăng nhập hay không (hỗ trợ cả `userId` và `driverProfileId` đã resolve). Nếu tài xế khác cố tình bắt đầu transit đơn hàng không được giao cho mình, hệ thống lập tức từ chối với `403 Forbidden`.
+
+### 2. Kiểm Tra Vòng Đời & Tính Bất Biến Lũy Đẳng (Lifecycle Validation & Idempotency)
+- **Hợp Lệ Cho Trạng Thái Hiện Tại**: Đơn hàng bắt buộc phải đang ở trạng thái `PICKED_UP` thì mới được phép bắt đầu transit. Nếu đơn hàng vẫn ở trạng thái `ASSIGNED` (chưa pickup) hoặc các trạng thái không hợp lệ khác (`UNASSIGNED`, `PENDING`, `SEARCHING_DRIVER`, `CANCELLED`, `FAILED`), hệ thống từ chối với `400 Bad Request` (`IllegalStateException`).
+- **Xử Lý Lũy Đẳng (Idempotency)**: Nếu tài xế bấm bắt đầu transit nhiều lần khi đơn đã ở trạng thái `IN_TRANSIT`, hệ thống trả về HTTP `200 OK` an toàn, giữ nguyên mốc thời gian `transit_started_at` ban đầu, không tạo bản ghi lịch sử trùng lặp và không publish lại event lên Kafka.
+
+### 3. Cập Nhật Dữ Liệu & Audit History
+- **Database Schema**: Bổ sung các cột mới vào bảng `assignments` thông qua Liquibase changeset `010-add-transit-fields-to-assignments.yaml`:
+  - `transit_started_at`: TIMESTAMP WITH TIME ZONE (thời điểm tài xế bấm bắt đầu giao hàng).
+  - `transit_notes`: VARCHAR(255) (ghi chú lộ trình hoặc tình trạng vận chuyển tùy chọn từ tài xế).
+- **Lưu Vết Lịch Sử (Audit Log)**: Ghi nhận một bản ghi mới trong bảng `assignment_histories`:
+  - `action_type`: `START_TRANSIT`
+  - `performed_by`: Username/ID của tài xế
+  - `new_driver_id`: ID của tài xế thực hiện transit
+  - `reason`: Thông tin chi tiết kèm `transit_notes`
+
+### 4. Phát Hành Business Event (Kafka Event Broadcast)
+- Khi bắt đầu transit thành công, hệ thống phát hành business event `ORDER_IN_TRANSIT` lên topic `logistics.shipment.events`:
+  - `event_id`: UUID định danh duy nhất cho event
+  - `event_type`: `"ORDER_IN_TRANSIT"`
+  - `timestamp`: Mốc thời gian ISO-8601
+  - `payload`: Bao gồm `orderId`, `orderNumber`, `assignmentId`, `driverId`, `transitStartedAt`, `transitNotes`, `status: "IN_TRANSIT"`
+  - `partition_key`: `orderId` (đảm bảo thứ tự xử lý tuần tự trên partition cho từng đơn hàng)
+
+### 5. REST API Endpoints
+- `POST /assignments/{orderId}/transit`
+- `POST /assignments/{orderId}/start-transit`
+- `POST /api/assignments/{orderId}/transit`
+- `POST /api/assignments/{orderId}/start-transit`
+- `POST /api/shipments/assignments/{orderId}/transit`
+- `POST /api/shipments/assignments/{orderId}/start-transit`
+- `POST /shipments/assignments/{orderId}/transit`
+- `POST /shipments/assignments/{orderId}/start-transit`
+- **Headers**: `Authorization: Bearer <driver-jwt-token>`, `Content-Type: application/json`
+- **Request Body (Tùy chọn)**:
+  ```json
+  {
+    "notes": "Đã rời điểm pickup, đang di chuyển trên tuyến đường Quốc lộ 1A"
+  }
+  ```
+- **Success Response (`200 OK`)**:
+  ```json
+  {
+    "success": true,
+    "message": "Order transit started successfully",
+    "data": {
+      "assignmentId": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+      "orderId": "ORD-12345",
+      "orderNumber": "ORD-20261020-001",
+      "recipientName": "Tran Van B",
+      "recipientPhone": "0912345678",
+      "pickupAddress": "123 Lê Duẩn, Quận 1, TP.HCM",
+      "deliveryAddress": "456 Nguyễn Trãi, Quận 5, TP.HCM",
+      "totalAmount": 150000.00,
+      "status": "IN_TRANSIT",
+      "assignedAt": "2026-10-20T08:00:00Z",
+      "pickedUpAt": "2026-10-20T08:30:00Z",
+      "transitStartedAt": "2026-10-20T08:45:00Z",
+      "pickupNotes": "Kiện hàng nguyên vẹn, đã kiểm tra tem niêm phong",
+      "transitNotes": "Đã rời điểm pickup, đang di chuyển trên tuyến đường Quốc lộ 1A",
+      "notes": "Handle with care",
+      "createdAt": "2026-10-20T08:00:00Z"
+    }
+  }
+  ```
+
+---
+
+## Driver Management: Driver Xác Nhận Giao Hàng Thành Công (PB-041)
+
+Cung cấp API cho phép tài xế (`DRIVER`) xác nhận đã hoàn tất giao hàng thành công cho đơn hàng đang vận chuyển (`IN_TRANSIT`). Khi hành động hợp lệ được thực hiện, hệ thống chuyển `Assignment` sang trạng thái `DELIVERED`, lưu nhận mốc thời gian `delivered_at`, ghi chú giao hàng `delivery_notes`, bằng chứng giao hàng `proof_of_delivery`, ghi nhận audit history (`DELIVER`) và phát hành business event `ORDER_DELIVERED` lên Kafka.
+
+### 1. Phân Quyền & Kiểm Tra Quyền Sở Hữu Nghiêm Ngặt (Strict RBAC & Driver Ownership)
+- **Kiểm Soát Quyền Truy Cập (RBAC)**: Chỉ duy nhất tài xế có vai trò `DRIVER` trong JWT Bearer token mới được phép thực hiện hành động này. Các vai trò khác (`CUSTOMER`, `DISPATCHER`, `ADMIN`) đều bị từ chối với `403 Forbidden`. Yêu cầu thiếu hoặc sai token bị từ chối với `401 Unauthorized`.
+- **Xác Thực Quyền Sở Hữu (Ownership Verification)**: Hệ thống kiểm tra chặt chẽ `assignment.driverId` có trùng khớp với tài xế đang đăng nhập hay không (hỗ trợ cả `userId` và `driverProfileId` đã resolve). Nếu tài xế khác cố tình xác nhận giao đơn hàng không được giao cho mình, hệ thống lập tức từ chối với `403 Forbidden`.
+
+### 2. Kiểm Tra Vòng Đời & Tính Bất Biến Lũy Đẳng (Lifecycle Validation & Idempotency)
+- **Hợp Lệ Cho Trạng Thái Hiện Tại**: Đơn hàng bắt buộc phải đang ở trạng thái `IN_TRANSIT` mới được phép chuyển sang `DELIVERED`. Nếu đơn hàng chưa transit (`ASSIGNED`, `PICKED_UP`) hoặc các trạng thái không hợp lệ khác (`UNASSIGNED`, `PENDING`, `SEARCHING_DRIVER`, `CANCELLED`, `FAILED`), hệ thống từ chối với `400 Bad Request` (`IllegalStateException`).
+- **Xử Lý Lũy Đẳng (Idempotency)**: Nếu tài xế bấm xác nhận giao hàng nhiều lần khi đơn đã ở trạng thái `DELIVERED`, hệ thống trả về HTTP `200 OK` an toàn, giữ nguyên mốc thời gian `delivered_at` ban đầu, không tạo bản ghi lịch sử trùng lặp và không publish lại event lên Kafka.
+
+### 3. Cập Nhật Dữ Liệu & Audit History
+- **Database Schema**: Bổ sung các cột mới vào bảng `assignments` thông qua Liquibase changeset `011-add-delivery-fields-to-assignments.yaml`:
+  - `delivered_at`: TIMESTAMP WITH TIME ZONE (thời điểm tài xế bấm xác nhận giao hàng thành công).
+  - `delivery_notes`: VARCHAR(255) (ghi chú tùy chọn từ tài xế khi giao hàng, ví dụ: người nhận ký tên, để trước cửa).
+  - `proof_of_delivery`: VARCHAR(255) (bằng chứng giao hàng như URL ảnh, chữ ký hoặc mã xác nhận).
+- **Lưu Vết Lịch Sử (Audit Log)**: Ghi nhận một bản ghi mới trong bảng `assignment_histories`:
+  - `action_type`: `DELIVER`
+  - `performed_by`: Username/ID của tài xế
+  - `new_driver_id`: ID của tài xế hoàn tất giao hàng
+  - `reason`: Thông tin chi tiết kèm `delivery_notes`
+
+### 4. Phát Hành Business Event (Kafka Event Broadcast)
+- Khi xác nhận giao hàng thành công, hệ thống phát hành business event `ORDER_DELIVERED` lên topic `logistics.shipment.events`:
+  - `event_id`: UUID định danh duy nhất cho event
+  - `event_type`: `"ORDER_DELIVERED"`
+  - `timestamp`: Mốc thời gian ISO-8601
+  - `payload`: Bao gồm `orderId`, `orderNumber`, `assignmentId`, `driverId`, `deliveredAt`, `deliveryNotes`, `proofOfDelivery`, `recipientSignature`, `status: "DELIVERED"`
+  - `partition_key`: `orderId` (đảm bảo thứ tự xử lý tuần tự trên partition cho từng đơn hàng)
+
+### 5. REST API Endpoints
+- `POST /assignments/{orderId}/deliver`
+- `POST /assignments/{orderId}/complete-delivery`
+- `POST /assignments/{orderId}/delivered`
+- `POST /api/assignments/{orderId}/deliver`
+- `POST /api/assignments/{orderId}/complete-delivery`
+- `POST /api/assignments/{orderId}/delivered`
+- `POST /api/shipments/assignments/{orderId}/deliver`
+- `POST /api/shipments/assignments/{orderId}/complete-delivery`
+- `POST /api/shipments/assignments/{orderId}/delivered`
+- `POST /shipments/assignments/{orderId}/deliver`
+- `POST /shipments/assignments/{orderId}/complete-delivery`
+- `POST /shipments/assignments/{orderId}/delivered`
+- **Headers**: `Authorization: Bearer <driver-jwt-token>`, `Content-Type: application/json`
+- **Request Body (Tùy chọn)**:
+  ```json
+  {
+    "notes": "Đã giao tận tay người nhận, hàng nguyên vẹn",
+    "recipientSignature": "Nguyen Van B",
+    "proofOfDelivery": "https://cdn.example.com/pod/ORD-12345.jpg"
+  }
+  ```
+- **Success Response (`200 OK`)**:
+  ```json
+  {
+    "success": true,
+    "message": "Order delivery confirmed successfully",
+    "data": {
+      "assignmentId": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+      "orderId": "ORD-12345",
+      "orderNumber": "ORD-20261020-001",
+      "recipientName": "Tran Van B",
+      "recipientPhone": "0912345678",
+      "pickupAddress": "123 Lê Duẩn, Quận 1, TP.HCM",
+      "deliveryAddress": "456 Nguyễn Trãi, Quận 5, TP.HCM",
+      "totalAmount": 150000.00,
+      "status": "DELIVERED",
+      "assignedAt": "2026-10-20T08:00:00Z",
+      "pickedUpAt": "2026-10-20T08:30:00Z",
+      "transitStartedAt": "2026-10-20T08:45:00Z",
+      "deliveredAt": "2026-10-20T09:15:00Z",
+      "pickupNotes": "Kiện hàng nguyên vẹn, đã kiểm tra tem niêm phong",
+      "transitNotes": "Đã rời điểm pickup, đang di chuyển trên tuyến đường Quốc lộ 1A",
+      "deliveryNotes": "Đã giao tận tay người nhận, hàng nguyên vẹn",
+      "proofOfDelivery": "https://cdn.example.com/pod/ORD-12345.jpg",
+      "notes": "Handle with care",
+      "createdAt": "2026-10-20T08:00:00Z"
+    }
+  }
+  ```
+
+---
+
+## Driver Management: Driver Báo Giao Hàng Thất Bại (PB-042)
+
+Cung cấp API cho phép tài xế (`DRIVER`) báo một đơn hàng giao thất bại khi đang trong quá trình giao hàng (`IN_TRANSIT` hoặc `PICKED_UP`). Khi hành động hợp lệ được thực hiện, hệ thống chuyển `Assignment` sang trạng thái `FAILED`, lưu trữ mốc thời gian `failed_at`, lý do thất bại `failure_reason`, ghi chú thất bại `failure_notes`, ghi nhận audit history (`DELIVERY_FAILED`) và phát hành business event `ORDER_FAILED` lên Kafka.
+
+### 1. Phân Quyền & Kiểm Tra Quyền Sở Hữu Nghiêm Ngặt (Strict RBAC & Driver Ownership)
+- **Kiểm Soát Quyền Truy Cập (RBAC)**: Chỉ duy nhất tài xế có vai trò `DRIVER` trong JWT Bearer token mới được phép thực hiện hành động này. Các vai trò khác (`CUSTOMER`, `DISPATCHER`, `ADMIN`) đều bị từ chối với `403 Forbidden`. Yêu cầu thiếu hoặc sai token bị từ chối với `401 Unauthorized`.
+- **Xác Thực Quyền Sở Hữu (Ownership Verification)**: Hệ thống kiểm tra chặt chẽ `assignment.driverId` có trùng khớp với tài xế đang đăng nhập hay không (hỗ trợ cả `userId` và `driverProfileId` đã resolve). Nếu tài xế khác cố tình báo thất bại cho đơn hàng không được giao cho mình, hệ thống lập tức từ chối với `403 Forbidden`.
+
+### 2. Kiểm Tra Vòng Đời & Tính Bất Biến Lũy Đẳng (Lifecycle Validation & Idempotency)
+- **Hợp Lệ Cho Trạng Thái Hiện Tại**: Đơn hàng bắt buộc phải đang ở trạng thái vận chuyển tích cực: `IN_TRANSIT` hoặc `PICKED_UP`. Nếu đơn hàng chưa được nhận (`ASSIGNED`), đã kết thúc (`DELIVERED`, `CANCELLED`), hoặc chưa được gán (`UNASSIGNED`, `PENDING`), hệ thống từ chối với `400 Bad Request` (`IllegalStateException`).
+- **Validate Lý Do Thất Bại (Failure Reason Validation)**: Yêu cầu bắt buộc phải có lý do thất bại (`failureReason` hoặc `reason`), không được để trống hoặc chỉ chứa khoảng trắng, tối thiểu 3 ký tự (ví dụ: `RECIPIENT_UNREACHABLE`, `RECIPIENT_REFUSED`, `WRONG_ADDRESS`, `DAMAGED_PACKAGE`). Nếu thiếu hoặc không hợp lệ, hệ thống từ chối với `400 Bad Request` (`IllegalArgumentException`).
+- **Xử Lý Lũy Đẳng (Idempotency)**: Nếu tài xế bấm báo thất bại nhiều lần khi đơn đã ở trạng thái `FAILED`, hệ thống trả về HTTP `200 OK` an toàn, giữ nguyên mốc thời gian `failed_at` ban đầu, không tạo bản ghi lịch sử trùng lặp và không publish lại event lên Kafka.
+
+### 3. Cập Nhật Dữ Liệu & Audit History
+- **Database Schema**: Bổ sung các cột mới vào bảng `assignments` thông qua Liquibase changeset `012-add-failure-fields-to-assignments.yaml`:
+  - `failed_at`: TIMESTAMP WITH TIME ZONE (thời điểm tài xế bấm báo thất bại).
+  - `failure_reason`: VARCHAR(255) (lý do giao hàng thất bại, ví dụ: không liên lạc được người nhận, sai địa chỉ, người nhận từ chối).
+  - `failure_notes`: VARCHAR(255) (ghi chú chi tiết từ tài xế về tình huống giao hàng).
+- **Lưu Vết Lịch Sử (Audit Log)**: Ghi nhận một bản ghi mới trong bảng `assignment_histories`:
+  - `action_type`: `DELIVERY_FAILED`
+  - `performed_by`: Username/ID của tài xế
+  - `new_driver_id`: ID của tài xế báo thất bại
+  - `reason`: Chi tiết lý do thất bại kèm `failure_notes`
+
+### 4. Phát Hành Business Event (Kafka Event Broadcast)
+- Khi báo thất bại thành công, hệ thống phát hành business event `ORDER_FAILED` lên topic `logistics.shipment.events`:
+  - `event_id`: UUID định danh duy nhất cho event
+  - `event_type`: `"ORDER_FAILED"`
+  - `timestamp`: Mốc thời gian ISO-8601
+  - `payload`: Bao gồm `orderId`, `orderNumber`, `assignmentId`, `driverId`, `failedAt`, `failureReason`, `failureNotes`, `deliveryAddress`, `totalAmount`, `status: "FAILED"`
+  - `partition_key`: `orderId` (đảm bảo thứ tự xử lý tuần tự trên partition cho từng đơn hàng)
+
+### 5. REST API Endpoints
+- `POST /assignments/{orderId}/fail`
+- `POST /assignments/{orderId}/failed`
+- `POST /assignments/{orderId}/fail-delivery`
+- `POST /api/assignments/{orderId}/fail`
+- `POST /api/assignments/{orderId}/failed`
+- `POST /api/assignments/{orderId}/fail-delivery`
+- `POST /api/shipments/assignments/{orderId}/fail`
+- `POST /api/shipments/assignments/{orderId}/failed`
+- `POST /api/shipments/assignments/{orderId}/fail-delivery`
+- `POST /shipments/assignments/{orderId}/fail`
+- `POST /shipments/assignments/{orderId}/failed`
+- `POST /shipments/assignments/{orderId}/fail-delivery`
+- **Headers**: `Authorization: Bearer <driver-jwt-token>`, `Content-Type: application/json`
+- **Request Body**:
+  ```json
+  {
+    "failureReason": "RECIPIENT_UNREACHABLE",
+    "notes": "Đã gọi 3 cuộc cách nhau 15 phút, chuông đổ không ai nghe máy, cửa khóa ngoài"
+  }
+  ```
+- **Success Response (`200 OK`)**:
+  ```json
+  {
+    "success": true,
+    "message": "Order delivery failure reported successfully",
+    "data": {
+      "assignmentId": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+      "orderId": "ORD-12345",
+      "orderNumber": "ORD-20261020-001",
+      "recipientName": "Tran Van B",
+      "recipientPhone": "0912345678",
+      "pickupAddress": "123 Lê Duẩn, Quận 1, TP.HCM",
+      "deliveryAddress": "456 Nguyễn Trãi, Quận 5, TP.HCM",
+      "totalAmount": 150000.00,
+      "status": "FAILED",
+      "assignedAt": "2026-10-20T08:00:00Z",
+      "pickedUpAt": "2026-10-20T08:30:00Z",
+      "transitStartedAt": "2026-10-20T08:45:00Z",
+      "failedAt": "2026-10-20T09:30:00Z",
+      "failureReason": "RECIPIENT_UNREACHABLE",
+      "failureNotes": "Đã gọi 3 cuộc cách nhau 15 phút, chuông đổ không ai nghe máy, cửa khóa ngoài",
+      "notes": "Handle with care",
+      "createdAt": "2026-10-20T08:00:00Z"
+    }
+  }
+  ```
+
+---
+
+## Operations: Xử Lý Order FAILED & Reassign Driver (PB-043)
+
+Triển khai nghiệp vụ cho phép bộ phận Vận hành (Operations / Dispatcher / Admin) theo dõi danh sách các đơn hàng giao thất bại (`FAILED`), tra cứu nguyên nhân thất bại (`failureReason`, `failureNotes`, `failedAt`), và thực hiện phân công lại (Reassign) cho Driver mới đủ điều kiện khi nghiệp vụ cho phép.
+
+### 1. Kiến trúc & Đặc điểm kỹ thuật
+
+- **Tái sử dụng thuật toán PB-036**: Tích hợp trực tiếp vào luồng `reassignDriver` trong `AssignmentService` thay vì tạo pipeline phân công riêng biệt; đảm bảo tính thống nhất trong toàn bộ hệ thống.
+- **State Machine Integrity**:
+  - Hỗ trợ đổi tài xế cho đơn hàng ở cả trạng thái `ASSIGNED` và `FAILED`.
+  - Chuyển trạng thái đơn hàng từ `FAILED` -> `ASSIGNED`.
+  - Từ chối thao tác reassign trên các đơn hàng đã ở trạng thái kết thúc (`DELIVERED`, `CANCELLED`) bằng lỗi `400 Bad Request` (`IllegalStateException`).
+  - Đơn chưa từng được gán tài xế (`UNASSIGNED`) phải dùng API phân công ban đầu (`manual-assign`).
+- **Thu hồi quyền tài xế cũ**:
+  - Ghi nhận `previousDriverId` = tài xế báo thất bại; cập nhật `driverId` = tài xế mới.
+  - Ngăn chặn triệt để tài xế cũ thực hiện bất kỳ hành động nào tiếp theo (`confirmPickup`, `startTransit`, `confirmDelivery`, `reportDeliveryFailure`); tất cả sẽ bị từ chối với `403 Forbidden` ("You are not the assigned driver").
+  - Reset trạng thái pickup & transit (`pickedUpAt = null`, `transitStartedAt = null`) để tài xế mới thực hiện quy trình nhận đơn mới.
+- **Audit History & Domain Events**:
+  - Lưu bản ghi audit vào bảng `assignment_histories` với action `REASSIGN`, lưu thông tin `previousDriverId`, `newDriverId`, `reassignReason`, `performedBy` (username của Operator).
+  - Tự động phát hành đồng thời cả 2 domain event qua Kafka topic `logistics.shipment.events`:
+    1. `DRIVER_REASSIGNED`: Thông báo thay đổi tài xế cho các consumer theo dõi lịch sử phân công.
+    2. `DRIVER_ASSIGNED`: Đảm bảo tương thích ngược cho các luồng downstream tiếp nhận nhiệm vụ của tài xế mới.
+- **Strict Role-Based Access Control (RBAC)**:
+  - Chỉ cho phép người dùng có vai trò `ADMIN` hoặc `DISPATCHER` thực hiện tra cứu danh sách đơn FAILED và reassign.
+  - Từ chối `DRIVER` hoặc `CUSTOMER` với mã `403 Forbidden`.
+  - Thiếu hoặc sai token bị từ chối với mã `401 Unauthorized`.
+- **Giao diện Điều hành (fe_dispatcher)**:
+  - Màn hình chi tiết đơn hàng hiển thị banner cảnh báo đơn thất bại, nguyên nhân thất bại và nút "Reassign driver".
+  - Hộp thoại gán tài xế (AssignModal) tự động nhận diện chế độ Reassign, hiển thị danh sách tài xế khả dụng và ghi chú quy trình chuyển giao.
+
+### 2. Endpoints Chi tiết
+
+| Method | Endpoint | Quyền | Mô tả |
+|---|---|---|---|
+| `GET` | `/assignments/failed` (hoặc `/api/assignments/failed`) | `ADMIN`, `DISPATCHER` | Lấy danh sách đơn FAILED phân trang (`page`, `size`, `sort`) |
+| `GET` | `/assignments/failed/{orderId}` (hoặc `/api/assignments/failed/{orderId}`) | `ADMIN`, `DISPATCHER` | Xem chi tiết đơn FAILED, nguyên nhân thất bại và tài xế phụ trách trước đó |
+| `GET` | `/assignments/unassigned?status=FAILED` | `ADMIN`, `DISPATCHER` | Bộ lọc đơn FAILED trong API quản lý danh sách đơn chưa hoàn tất |
+| `POST` | `/assignments/{orderId}/reassign` (hoặc `/api/assignments/{orderId}/reassign`) | `ADMIN`, `DISPATCHER` | Reassign đơn FAILED sang tài xế mới |
+
+---
+
+## Driver Management & Tracking: Driver Gửi GPS Location (PB-044)
+
+Triển khai API và dịch vụ tiếp nhận tọa độ GPS thời gian thực từ ứng dụng Driver trong `shipment-service` (đóng vai trò Shipment & Tracking Service), phục vụ giám sát vị trí tài xế, tính toán khoảng cách lộ trình và theo dõi hành trình giao vận.
+
+### 1. Kiến trúc & Đặc điểm kỹ thuật
+
+- **Mô hình Dữ liệu GPS & Tối ưu Hiệu năng (Table `driver_locations`)**:
+  - Bảng `driver_locations` lưu trữ tọa độ mới nhất của mỗi tài xế (mỗi `driver_id` là duy nhất với ràng buộc `UNIQUE` và index B-Tree).
+  - Tránh phình to dữ liệu không kiểm soát khi tài xế gửi vị trí theo chu kỳ tần suất cao (high-frequency ping).
+  - Tích hợp trực tiếp với tầng cơ sở dữ liệu quan hệ (PostgreSQL / Liquibase), **không tự động đẩy lên Kafka** trên từng ping định vị nhằm bảo vệ message broker khỏi tình trạng nghẽn băng thông.
+- **Bảo vệ Thứ tự Dữ liệu (Stale Out-of-Order Packet Prevention)**:
+  - Hệ thống kiểm tra so sánh `timestamp` của gói tin gửi lên với `timestamp` hiện đang lưu trong hệ thống.
+  - Từ chối ghi đè nếu gói tin GPS có `timestamp` cũ hơn tọa độ hiện hành bằng lỗi `400 Bad Request` (`IllegalArgumentException`).
+  - Kiểm tra độ lệch đồng hồ (Clock Skew): từ chối tọa độ có timestamp trong tương lai vượt quá ngưỡng cho phép (+5 phút).
+- **Kiểm định Tọa độ Chặt chẽ (Coordinate Validation)**:
+  - Vĩ độ (`latitude`): Bắt buộc, nằm trong khoảng $[-90.0, 90.0]$ độ, số thực hữu hạn (không chấp nhận NaN hoặc Infinite).
+  - Kinh độ (`longitude`): Bắt buộc, nằm trong khoảng $[-180.0, 180.0]$ độ, số thực hữu hạn.
+  - Các thông số vận hành bổ sung: `accuracy` ($\ge 0$), `speed` ($\ge 0$), `bearing` ($[0, 360]$ độ), mã đơn hàng liên kết (`orderId`).
+- **Bảo mật & Phân quyền (RBAC & Identity Isolation)**:
+  - Chỉ cho phép người dùng có vai trò `DRIVER` (hoặc `ADMIN`) gửi vị trí.
+  - Danh tính `userId` và `driverId` được trích xuất an toàn từ JWT Bearer token đã qua xác minh; không tin cậy `driverId` tùy ý do client truyền lên.
+  - Từ chối vai trò không được phép (`CUSTOMER`) với mã `403 Forbidden`; từ chối token không hợp lệ hoặc thiếu với mã `401 Unauthorized`.
+  - Logging an toàn: Tuyệt đối không ghi token hay dữ liệu nhạy cảm vào log hệ thống.
+- **Tích hợp Tự động với Dispatching & Proximity Scoring**:
+  - `DefaultDriverClient` tự động nạp vị trí thực tế mới nhất từ `driverLocationRepository` gắn vào `EligibleDriver` để thuật toán Haversine (`DriverProximityFilter`, **PB-029**) tính khoảng cách chính xác tới điểm lấy hàng.
+
+### 2. Endpoints Chi tiết
+
+| Method | Endpoint | Quyền | Mô tả |
+|---|---|---|---|
+| `POST` | `/tracking/location` (hoặc `/shipments/tracking/location`, `/api/tracking/location`) | `DRIVER`, `ADMIN` | Ghi nhận/cập nhật vị trí GPS thời gian thực của Driver |
+| `GET` | `/tracking/location` (hoặc `/shipments/tracking/location`) | `DRIVER`, `ADMIN` | Lấy vị trí GPS mới nhất của Driver hiện tại |
+| `GET` | `/tracking/drivers/{driverId}/location` | `DRIVER`, `ADMIN`, `DISPATCHER` | Tra cứu vị trí GPS mới nhất của tài xế theo ID |
+
+### 3. Ví dụ Payload Tiếp nhận GPS
+
+**Request Body (`POST /tracking/location`)**:
+```json
+{
+  "latitude": 21.028511,
+  "longitude": 105.854444,
+  "timestamp": "2026-10-21T03:10:00Z",
+  "accuracy": 5.0,
+  "speed": 35.5,
+  "bearing": 180.0,
+  "orderId": "ORD-10023"
+}
+```
+
+**Response Body (`200 OK`)**:
+```json
+{
+  "success": true,
+  "message": "Driver GPS location recorded successfully",
+  "data": {
+    "id": "c3e9821a-4d2b-426b-851f-998811223344",
+    "driverId": "drv-001",
+    "userId": "usr-driver-001",
+    "latitude": 21.028511,
+    "longitude": 105.854444,
+    "accuracy": 5.0,
+    "speed": 35.5,
+    "bearing": 180.0,
+    "orderId": "ORD-10023",
+    "timestamp": "2026-10-21T03:10:00Z",
+    "createdAt": "2026-10-21T03:00:00Z",
+    "updatedAt": "2026-10-21T03:10:00Z"
+  }
+}
+```
+
+---
+
+## Customer Tracking: Customer Xem Vị Trí Driver (PB-045)
+
+Cho phép Customer theo dõi vị trí GPS thời gian thực của Driver được phân công khi đơn hàng đang trong hành trình giao vận (`ASSIGNED`, `PICKED_UP`, `IN_TRANSIT`).
+
+### 1. Kiến trúc & Đặc điểm kỹ thuật
+
+- **Xác minh Quyền sở hữu Đơn hàng (Strict Ownership Check)**:
+  - Chỉ người dùng có vai trò `CUSTOMER` sở hữu đơn hàng (`customerId` khớp với token JWT) hoặc quản trị viên/điều phối viên (`ADMIN`, `DISPATCHER`) mới được phép truy xuất thông tin tracking.
+  - Từ chối truy cập đơn hàng của khách hàng khác bằng mã `403 Forbidden` (`AccessDeniedException`).
+- **Kiểm định Trạng thái Cho phép Tracking (Lifecycle & SRS Validation)**:
+  - Chỉ cho phép xem vị trí khi đơn hàng đang trong trạng thái giao vận: `ASSIGNED` (tài xế di chuyển tới điểm lấy hàng), `PICKED_UP` (đã nhận hàng), hoặc `IN_TRANSIT` (đang trên đường giao).
+  - Từ chối tracking nếu tài xế chưa được phân công (`PENDING`, `SEARCHING_DRIVER`, `UNASSIGNED`) với mã lỗi `400 Bad Request`.
+  - Từ chối tracking nếu đơn hàng đã kết thúc (`DELIVERED`, `CANCELLED`, `FAILED`) với mã lỗi `400 Bad Request`.
+- **Kiểm soát Độ mới Tọa độ & Xử lý Dữ liệu Cũ (Stale Data Protection)**:
+  - Ngưỡng độ mới GPS: 30 phút (đồng bộ với tiêu chuẩn chấm điểm tài xế).
+  - Nếu tọa độ đã cũ hơn 30 phút: Mặc định từ chối trả về bằng `400 Bad Request` (`IllegalStateException: Driver GPS location is stale`) nhằm ngăn ngừa hiển thị dữ liệu lỗi thời.
+  - Khi client truyền cờ `?allowStale=true`, hệ thống trả về vị trí gần nhất kèm cờ cảnh báo `stale: true`, số phút quá hạn `locationAgeMinutes` và `staleWarning`.
+- **Tích hợp Liên Service & Khả năng Chịu lỗi (Resilience & Gateway Routing)**:
+  - Khách hàng có thể truy xuất qua `order-service` (`GET /api/orders/{id}/tracking`) hoặc trực tiếp qua `shipment-service` (`GET /api/tracking/orders/{orderId}`).
+  - Xử lý lỗi khi Tracking Service không khả dụng: `order-service` bắt ngoại lệ kết nối/thời gian chờ và trả về `503 Service Unavailable` (`TrackingServiceUnavailableException`).
+- **Giao diện Customer / Dispatcher**:
+  - Tích hợp modal bản đồ trực quan `TrackDriverModal` trong `fe_dispatcher` hiển thị vị trí Hub lấy hàng, vị trí GPS thời gian thực của tài xế (kèm tốc độ, góc hướng, độ chính xác) và điểm giao hàng tới khách.
+
+### 2. Endpoints Chi tiết
+
+| Method | Endpoint | Quyền | Mô tả |
+|---|---|---|---|
+| `GET` | `/tracking/orders/{orderId}`<br>`/shipments/tracking/orders/{orderId}`<br>`/api/tracking/orders/{orderId}` | `CUSTOMER` (chủ đơn), `ADMIN`, `DISPATCHER` | Customer xem vị trí GPS của Driver được phân công cho đơn hàng |
+| `GET` | `/orders/{id}/tracking`<br>`/api/orders/{id}/tracking` | `CUSTOMER` (chủ đơn), `ADMIN`, `DISPATCHER` | Customer xem vị trí Driver qua Order Service |
+
+**Query Parameters tùy chọn**:
+- `allowStale` (boolean, mặc định `false`): Chấp nhận trả về tọa độ cũ hơn 30 phút kèm cảnh báo thay vì báo lỗi.
+
+### 3. Ví dụ Phản hồi Tracking (`200 OK`)
+
+```json
+{
+  "success": true,
+  "message": "Order driver location retrieved successfully",
+  "data": {
+    "orderId": "ord-2001",
+    "orderNumber": "ORD-2001",
+    "customerId": "cust-uuid-01",
+    "orderStatus": "IN_TRANSIT",
+    "assignmentStatus": "IN_TRANSIT",
+    "driverId": "drv-001",
+    "driverName": "T. Nguyen",
+    "latitude": 21.028511,
+    "longitude": 105.854444,
+    "updatedAt": "2026-10-21T03:10:00Z",
+    "accuracy": 5.0,
+    "speed": 28.5,
+    "bearing": 180.0,
+    "liveTrackingActive": true,
+    "stale": false,
+    "locationAgeMinutes": 2,
+    "staleWarning": null,
+    "message": "Driver location retrieved successfully"
+  }
+}
+```
+
+---
+
+## Operations Tracking: Operations Theo Dõi Driver (PB-046)
+
+Cho phép Operations (Dispatchers, Administrators) theo dõi vị trí GPS thời gian thực và trạng thái hoạt động của Driver để phục vụ điều phối và xử lý sự cố trong quá trình giao hàng.
+
+### 1. Kiến trúc & Đặc điểm kỹ thuật
+
+- **Phân quyền Nghiêm ngặt (Strict RBAC for Operations)**:
+  - Chỉ người dùng có vai trò `DISPATCHER` hoặc `ADMIN` mới được phép truy vấn dữ liệu theo dõi Driver.
+  - Từ chối truy cập từ người dùng có vai trò `CUSTOMER` hoặc `DRIVER` bằng mã `403 Forbidden` (`AccessDeniedException`).
+  - Yêu cầu token hợp lệ; thiếu hoặc sai token trả về `401 Unauthorized` (`BadCredentialsException`).
+- **Phân định Quyền Sở hữu Dữ liệu (Authoritative Data Ownership - No Cross-DB Replication)**:
+  - Thông tin danh tính, hồ sơ và trạng thái sẵn sàng của Driver do `user-service` sở hữu (`GET /drivers`).
+  - Thông tin đơn hàng đang phụ trách (`status in (ASSIGNED, PICKED_UP, IN_TRANSIT)`) do `shipment-service` (`AssignmentRepository`) sở hữu.
+  - Vị trí GPS thời gian thực do Tracking Service trong `shipment-service` (`DriverLocationRepository`) sở hữu (tái sử dụng dữ liệu từ PB-044).
+  - Không sao chép toàn bộ database giữa các service; dữ liệu được tổng hợp ở tầng application theo mô hình decoupled microservices.
+- **Xử lý các Trường hợp Biên (Edge Cases Handling)**:
+  - **Tài xế chưa có GPS**: Trả về `hasGps: false`, tọa độ `latitude: null`, `longitude: null`, `gpsUpdatedAt: null`.
+  - **Tọa độ GPS đã cũ (> 30 phút)**: Trả về `locationStale: true` kèm thông điệp cảnh báo `staleWarning: "Driver GPS location is stale: last updated X minutes ago"`.
+  - **Tài xế chưa có Order**: Trả về `hasActiveOrder: false`, `activeOrderId: null`, `activeOrderStatus: null`, trạng thái hoạt động phản ánh đúng trạng thái profile (`AVAILABLE` hoặc `UNAVAILABLE`).
+  - **Tài xế đang phụ trách đơn hàng**: Trả về `hasActiveOrder: true`, thông tin đơn hàng và chuyển trạng thái vận hành thành `BUSY`.
+- **Khả năng Chịu lỗi khi Service không khả dụng (Resilience & 503 Service Unavailable)**:
+  - Khi service cung cấp dữ liệu tài xế (`user-service`) gặp sự cố kết nối hoặc không phản hồi, hệ thống bắt ngoại lệ và trả về `503 Service Unavailable` (`DriverDataProviderUnavailableException`).
+- **Lọc, Tìm kiếm & Phân trang (Search, Multi-criteria Filtering & Pagination)**:
+  - Hỗ trợ tìm kiếm theo tên, số điện thoại, mã Driver, biển số xe hoặc mã đơn hàng.
+  - Lọc theo trạng thái hoạt động: `status` (`AVAILABLE`, `BUSY`, `UNAVAILABLE`).
+  - Lọc theo cờ phụ trách đơn hàng: `hasActiveOrder` (`true`/`false`).
+  - Lọc theo cờ GPS: `hasGps` (`true`/`false`).
+  - Giới hạn tải và phân trang: `page` (mặc định 0), `size` (mặc định 10, tối đa 100).
+- **Giao diện Điều phối Operations (`fe_dispatcher`)**:
+  - Tích hợp màn hình `DriversPage` với thanh tìm kiếm thời gian thực, các bộ lọc trạng thái và tín hiệu GPS, phân trang linh hoạt.
+  - Modal chi tiết `DriverDetailModal` xem thông tin hồ sơ, trạng thái vận hành, đơn hàng đang giao (với nút chuyển nhanh sang chi tiết đơn hàng).
+  - Bản đồ SVG trực quan cho Driver được chọn, hiển thị pin vị trí xe, lộ trình di chuyển và điểm giao hàng; không tải live toàn bộ đội xe cùng lúc nhằm tối ưu hiệu năng và tài nguyên mạng.
+
+### 2. Endpoints Chi tiết
+
+| Method | Endpoint | Quyền | Mô tả |
+|---|---|---|---|
+| `GET` | `/tracking/operations/drivers`<br>`/shipments/tracking/operations/drivers`<br>`/api/tracking/operations/drivers`<br>`/tracking/drivers` | `DISPATCHER`, `ADMIN` | Truy vấn danh sách Driver phục vụ theo dõi kèm vị trí GPS, trạng thái và đơn hàng active |
+| `GET` | `/tracking/operations/drivers/{driverId}`<br>`/shipments/tracking/operations/drivers/{driverId}`<br>`/api/tracking/operations/drivers/{driverId}` | `DISPATCHER`, `ADMIN` | Xem chi tiết thông tin theo dõi và vị trí GPS của một Driver cụ thể |
+
+**Query Parameters tùy chọn (`GET /tracking/operations/drivers`)**:
+- `page` (integer, mặc định `0`): Chỉ số trang.
+- `size` (integer, mặc định `10`, tối đa `100`): Kích thước trang.
+- `search` (string, tùy chọn): Tìm kiếm theo tên, số điện thoại, biển số, mã Driver hoặc mã Order.
+- `status` (string, tùy chọn): Lọc theo trạng thái `AVAILABLE`, `BUSY`, `UNAVAILABLE`.
+- `hasActiveOrder` (boolean, tùy chọn): Lọc theo trạng thái có/không có đơn hàng đang giao.
+- `hasGps` (boolean, tùy chọn): Lọc theo trạng thái có/không có tín hiệu GPS.
+
+### 3. Ví dụ Phản hồi Monitoring (`200 OK`)
+
+```json
+{
+  "success": true,
+  "message": "Driver monitoring data retrieved successfully",
+  "data": {
+    "content": [
+      {
+        "driverId": "drv-01",
+        "userId": "user-01",
+        "fullName": "Nguyen Van An",
+        "phoneNumber": "0901234567",
+        "vehicleType": "MOTORBIKE",
+        "vehiclePlate": "29A-12345",
+        "status": "ACTIVE",
+        "availability": "AVAILABLE",
+        "operationalStatus": "BUSY",
+        "hasActiveOrder": true,
+        "activeOrderId": "ord-ops-101",
+        "activeOrderNumber": "ORD-OPS-101",
+        "activeOrderStatus": "IN_TRANSIT",
+        "hasGps": true,
+        "latitude": 21.028511,
+        "longitude": 105.854444,
+        "gpsUpdatedAt": "2026-10-21T04:40:00Z",
+        "accuracy": 5.0,
+        "speed": 28.5,
+        "bearing": 180.0,
+        "locationStale": false,
+        "locationAgeMinutes": 2,
+        "staleWarning": null
+      },
+      {
+        "driverId": "drv-02",
+        "userId": "user-02",
+        "fullName": "Tran Thi Binh",
+        "phoneNumber": "0902345678",
+        "vehicleType": "VAN",
+        "vehiclePlate": "29B-23456",
+        "status": "ACTIVE",
+        "availability": "AVAILABLE",
+        "operationalStatus": "AVAILABLE",
+        "hasActiveOrder": false,
+        "activeOrderId": null,
+        "activeOrderNumber": null,
+        "activeOrderStatus": null,
+        "hasGps": true,
+        "latitude": 21.035,
+        "longitude": 105.84,
+        "gpsUpdatedAt": "2026-10-21T04:05:00Z",
+        "accuracy": 10.0,
+        "speed": 0.0,
+        "bearing": 0.0,
+        "locationStale": true,
+        "locationAgeMinutes": 37,
+        "staleWarning": "Driver GPS location is stale: last updated 37 minutes ago"
+      },
+      {
+        "driverId": "drv-03",
+        "userId": "user-03",
+        "fullName": "Le Van Cuong",
+        "phoneNumber": "0903456789",
+        "vehicleType": "TRUCK",
+        "vehiclePlate": "29C-34567",
+        "status": "ACTIVE",
+        "availability": "UNAVAILABLE",
+        "operationalStatus": "UNAVAILABLE",
+        "hasActiveOrder": false,
+        "activeOrderId": null,
+        "activeOrderNumber": null,
+        "activeOrderStatus": null,
+        "hasGps": false,
+        "latitude": null,
+        "longitude": null,
+        "gpsUpdatedAt": null,
+        "accuracy": null,
+        "speed": null,
+        "bearing": null,
+        "locationStale": false,
+        "locationAgeMinutes": null,
+        "staleWarning": null
+      }
+    ],
+    "page": 0,
+    "size": 10,
+    "totalElements": 3,
+    "totalPages": 1
+  }
+}
+```
+
+---
+
 ## Roadmap
 
 | PB Item | Scope | Status |
@@ -1967,6 +2657,20 @@ Việc lưu lịch sử được tích hợp nguyên khối trong cùng một gi
 | **PB-035** | Dispatching & Assignment: Chức năng Operations manual assign tại Assignment Service, RBAC & event broadcast | ✅ Completed |
 | **PB-036** | Dispatching & Assignment: Chức năng Operations reassign tại Assignment Service, audit trail & workload balance | ✅ Completed |
 | **PB-037** | Dispatching & Assignment: Lưu assignment history tại Assignment Service, audit trail & REST API | ✅ Completed |
+| **PB-038** | Driver Management: Driver xem danh sách Order được phân công cho mình, data isolation & safe DTO | ✅ Completed |
+| **PB-039** | Driver Management: Driver xác nhận pickup, cập nhật trạng thái PICKED_UP & event broadcast | ✅ Completed |
+| **PB-040** | Driver Management: Driver bắt đầu transit, cập nhật trạng thái IN_TRANSIT & event broadcast | ✅ Completed |
+| **PB-041** | Driver Management: Driver xác nhận giao hàng thành công, cập nhật trạng thái DELIVERED & event broadcast | ✅ Completed |
+| **PB-042** | Driver Management: Driver báo giao hàng thất bại, chuyển Order sang FAILED & lưu failure reason | ✅ Completed |
+| **PB-043** | Operations: Xử lý Order FAILED và cho phép Operations reassign khi phù hợp | ✅ Completed |
+| **PB-044** | Driver Management & Tracking: Driver gửi GPS location, validate tọa độ & cập nhật vị trí mới nhất | ✅ Completed |
+| **PB-045** | Customer Tracking: Customer xem vị trí Driver đang giao hàng, kiểm tra quyền sở hữu & trạng thái tracking | ✅ Completed |
+| **PB-046** | Operations Tracking: Operations theo dõi Driver, kiểm tra vị trí thời gian thực, trạng thái, active order & RBAC | ✅ Completed |
+
+
+
+
+
 
 
 

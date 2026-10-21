@@ -479,4 +479,71 @@ public class OrderService {
         String randomSuffix = UUID.randomUUID().toString().substring(0, 6).toUpperCase();
         return "ORD-" + timestamp + "-" + randomSuffix;
     }
+
+    @Inject
+    com.logistics.order.client.TrackingServiceClient trackingServiceClient;
+
+    public void setTrackingServiceClient(com.logistics.order.client.TrackingServiceClient trackingServiceClient) {
+        this.trackingServiceClient = trackingServiceClient;
+    }
+
+    public com.logistics.common.dto.OrderTrackingDto getOrderTracking(String authHeader, String orderIdentifier) {
+        return getOrderTracking(authHeader, orderIdentifier, false);
+    }
+
+    public com.logistics.common.dto.OrderTrackingDto getOrderTracking(String authHeader, String orderIdentifier, boolean allowStale) {
+        if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+            log.warn("Authentication failed: missing or invalid Authorization header");
+            throw new BadCredentialsException("Missing or invalid Authorization header");
+        }
+
+        String token = authHeader.substring(7).trim();
+        if (!jwtTokenProvider.validateToken(token)) {
+            log.warn("Authentication failed: token is invalid or expired");
+            throw new BadCredentialsException("Token is invalid or expired");
+        }
+
+        AuthPrincipal principal = AuthPrincipal.fromJwtToken(token, jwtTokenProvider);
+        if (principal == null) {
+            throw new BadCredentialsException("Token identity could not be verified");
+        }
+
+        if (orderIdentifier == null || orderIdentifier.isBlank()) {
+            throw new IllegalArgumentException("Order identifier cannot be empty");
+        }
+
+        String trimmedIdentifier = orderIdentifier.trim();
+        Order order = orderRepository.findByIdOrOrderNumber(trimmedIdentifier)
+                .orElseThrow(() -> {
+                    log.warn("Order not found with identifier '{}'", trimmedIdentifier);
+                    return new OrderNotFoundException("Order not found with identifier: " + trimmedIdentifier);
+                });
+
+        // Strict ownership check for CUSTOMER
+        if (principal.getRole() == Role.CUSTOMER && !principal.getUserId().equals(order.getCustomerId())) {
+            log.warn("Access denied: Customer '{}' attempted to view tracking of order '{}' belonging to customer '{}'",
+                    principal.getUserId(), order.getId(), order.getCustomerId());
+            throw new AccessDeniedException("Access denied: You do not have permission to view tracking for this order");
+        }
+
+        // State check: Order must be in trackable state (ASSIGNED or IN_TRANSIT)
+        OrderStatus status = order.getStatus();
+        if (status != OrderStatus.ASSIGNED && status != OrderStatus.IN_TRANSIT) {
+            if (status == OrderStatus.DELIVERED) {
+                throw new IllegalStateException("Order is not in a trackable state: Order has already been delivered");
+            }
+            if (status == OrderStatus.CANCELLED) {
+                throw new IllegalStateException("Order is not in a trackable state: Order has been cancelled");
+            }
+            throw new IllegalStateException("Order is not in a trackable state: Driver has not been assigned yet (current status: " + status + ")");
+        }
+
+        if (trackingServiceClient == null) {
+            log.error("Tracking Service client is not available or unconfigured");
+            throw new com.logistics.order.exception.TrackingServiceUnavailableException("Tracking Service is currently unavailable");
+        }
+
+        return trackingServiceClient.getOrderTracking(authHeader, order.getId(), allowStale);
+    }
 }
+

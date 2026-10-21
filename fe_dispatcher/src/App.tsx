@@ -274,83 +274,163 @@ const exceptions = [
   },
 ]
 
-const drivers = [
+export interface DriverMonitoringItem {
+  id: string
+  name: string
+  phone: string
+  status: "AVAILABLE" | "BUSY" | "OFFLINE" | "SUSPENDED"
+  order: string
+  orderStatus?: string
+  workload: string
+  vehicle: string
+  plate: string
+  activity: string
+  completed: number
+  failed: number
+  hasGps: boolean
+  latitude?: number
+  longitude?: number
+  gpsUpdatedAt?: string
+  locationStale?: boolean
+  accuracy?: number
+  speed?: number
+}
+
+const drivers: DriverMonitoringItem[] = [
   {
     id: "DRV-1048",
     name: "Danish Rahman",
+    phone: "0901 234 567",
     status: "BUSY",
     order: "SXP-240519-8839",
+    orderStatus: "IN_TRANSIT",
     workload: "2 active",
     vehicle: "Motorcycle",
+    plate: "29A-883.91",
     activity: "1m ago",
     completed: 12,
     failed: 0,
+    hasGps: true,
+    latitude: 21.028511,
+    longitude: 105.854444,
+    gpsUpdatedAt: "2m ago",
+    locationStale: false,
+    accuracy: 4.8,
+    speed: 28.5,
   },
   {
     id: "DRV-0923",
     name: "Li Wei",
+    phone: "0902 345 678",
     status: "BUSY",
     order: "SXP-240519-8831",
+    orderStatus: "PICKED_UP",
     workload: "1 active",
     vehicle: "Van",
+    plate: "29B-992.33",
     activity: "2m ago",
     completed: 8,
     failed: 0,
+    hasGps: true,
+    latitude: 21.0335,
+    longitude: 105.845,
+    gpsUpdatedAt: "1m ago",
+    locationStale: false,
+    accuracy: 3.2,
+    speed: 15.0,
   },
   {
     id: "DRV-1155",
     name: "Farid Ismail",
+    phone: "0903 456 789",
     status: "BUSY",
     order: "SXP-240519-8812",
+    orderStatus: "ASSIGNED",
     workload: "2 active",
     vehicle: "Motorcycle",
+    plate: "29A-115.54",
     activity: "3m ago",
     completed: 10,
     failed: 1,
+    hasGps: true,
+    latitude: 21.015,
+    longitude: 105.86,
+    gpsUpdatedAt: "4m ago",
+    locationStale: false,
+    accuracy: 5.5,
+    speed: 0.0,
   },
   {
     id: "DRV-0881",
     name: "Thu Nguyen",
+    phone: "0904 567 890",
     status: "AVAILABLE",
     order: "—",
     workload: "0 active",
     vehicle: "Car",
+    plate: "30E-881.02",
     activity: "Just now",
     completed: 9,
     failed: 0,
+    hasGps: true,
+    latitude: 21.04,
+    longitude: 105.83,
+    gpsUpdatedAt: "35m ago",
+    locationStale: true,
+    accuracy: 12.0,
+    speed: 0.0,
   },
   {
     id: "DRV-1210",
     name: "Alvin Teo",
+    phone: "0905 678 901",
     status: "AVAILABLE",
     order: "—",
     workload: "1 queued",
     vehicle: "Van",
+    plate: "29D-121.05",
     activity: "1m ago",
     completed: 7,
     failed: 0,
+    hasGps: true,
+    latitude: 21.022,
+    longitude: 105.82,
+    gpsUpdatedAt: "Just now",
+    locationStale: false,
+    accuracy: 4.0,
+    speed: 14.2,
   },
   {
     id: "DRV-0732",
     name: "Jay Kumar",
+    phone: "0906 789 012",
     status: "OFFLINE",
     order: "—",
     workload: "0 active",
     vehicle: "Motorcycle",
+    plate: "29A-732.18",
     activity: "14m ago",
     completed: 6,
     failed: 2,
+    hasGps: false,
+    gpsUpdatedAt: "No GPS recorded",
+    locationStale: false,
   },
   {
     id: "DRV-1009",
     name: "Sofia Malik",
+    phone: "0907 890 123",
     status: "SUSPENDED",
     order: "—",
     workload: "0 active",
     vehicle: "Car",
+    plate: "30F-100.99",
     activity: "2d ago",
     completed: 0,
     failed: 0,
+    hasGps: false,
+    gpsUpdatedAt: "No GPS recorded",
+    locationStale: false,
   },
 ]
 
@@ -938,16 +1018,331 @@ function AssignmentPage({
   )
 }
 
-function DriversPage() {
+function DriverDetailModal({
+  driver,
+  close,
+  openOrder,
+}: {
+  driver: DriverMonitoringItem
+  close: () => void
+  openOrder?: (id: string) => void
+}) {
+  return (
+    <div className="modal-backdrop">
+      <div className="modal" style={{ maxWidth: 680 }}>
+        <div className="modal-head">
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <div className="avatar">
+              {driver.name
+                .split(" ")
+                .map((n) => n[0])
+                .join("")}
+            </div>
+            <div>
+              <h2>{driver.name}</h2>
+              <p style={{ margin: 0, fontSize: 13, color: "#64748b" }}>
+                {driver.id} · {driver.phone} · {driver.vehicle} ({driver.plate})
+              </p>
+            </div>
+          </div>
+          <button className="icon-btn" onClick={close}>
+            ✕
+          </button>
+        </div>
+
+        <div style={{ padding: "16px 24px" }}>
+          {/* Status and Active Order strip */}
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(3, 1fr)",
+              gap: 12,
+              marginBottom: 16,
+            }}
+          >
+            <div style={{ background: "#0f172a", border: "1px solid #1e293b", padding: 12, borderRadius: 8 }}>
+              <div style={{ fontSize: 11, color: "#94a3b8", textTransform: "uppercase" }}>Driver Status</div>
+              <div style={{ marginTop: 4 }}>
+                <Badge>{driver.status}</Badge>
+              </div>
+            </div>
+            <div style={{ background: "#0f172a", border: "1px solid #1e293b", padding: 12, borderRadius: 8 }}>
+              <div style={{ fontSize: 11, color: "#94a3b8", textTransform: "uppercase" }}>Workload</div>
+              <div style={{ marginTop: 4, fontWeight: "bold", color: "#f8fafc", fontSize: 14 }}>
+                {driver.workload}
+              </div>
+            </div>
+            <div style={{ background: "#0f172a", border: "1px solid #1e293b", padding: 12, borderRadius: 8 }}>
+              <div style={{ fontSize: 11, color: "#94a3b8", textTransform: "uppercase" }}>Today's Delivery</div>
+              <div style={{ marginTop: 4, fontSize: 13, color: "#f8fafc" }}>
+                <span style={{ color: "#22c55e", fontWeight: "bold" }}>{driver.completed} done</span>
+                {driver.failed > 0 && <span style={{ color: "#ef4444", marginLeft: 6 }}>· {driver.failed} failed</span>}
+              </div>
+            </div>
+          </div>
+
+          {/* Active Order Card */}
+          <div
+            style={{
+              background: "#0f172a",
+              border: "1px solid #1e293b",
+              borderRadius: 8,
+              padding: 14,
+              marginBottom: 16,
+            }}
+          >
+            <div style={{ fontSize: 12, color: "#94a3b8", textTransform: "uppercase", marginBottom: 6 }}>
+              Assigned Order (Active Transit)
+            </div>
+            {driver.order !== "—" ? (
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <div>
+                  <strong
+                    style={{ fontSize: 15, color: "#38bdf8", cursor: "pointer", textDecoration: "underline" }}
+                    onClick={() => {
+                      close()
+                      if (openOrder) openOrder(driver.order)
+                    }}
+                  >
+                    {driver.order}
+                  </strong>
+                  <span style={{ marginLeft: 8 }}><Badge>{driver.orderStatus || "IN_TRANSIT"}</Badge></span>
+                  <p style={{ margin: "4px 0 0", fontSize: 12, color: "#94a3b8" }}>
+                    Order in active fulfillment. Driver currently navigating along delivery route.
+                  </p>
+                </div>
+                {openOrder && (
+                  <Button
+                    variant="secondary"
+                    onClick={() => {
+                      close()
+                      openOrder(driver.order)
+                    }}
+                  >
+                    View Order
+                  </Button>
+                )}
+              </div>
+            ) : (
+              <div style={{ fontSize: 13, color: "#64748b" }}>
+                No active delivery assigned to this driver. Driver is currently idle and ready for dispatch.
+              </div>
+            )}
+          </div>
+
+          {/* Real-Time GPS Tracking Card */}
+          <div
+            style={{
+              background: "#0f172a",
+              border: "1px solid #334155",
+              borderRadius: 10,
+              padding: 16,
+              position: "relative",
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span
+                  style={{
+                    display: "inline-block",
+                    width: 10,
+                    height: 10,
+                    borderRadius: "50%",
+                    background: driver.hasGps ? (driver.locationStale ? "#f59e0b" : "#22c55e") : "#64748b",
+                    boxShadow: driver.hasGps && !driver.locationStale ? "0 0 8px #22c55e" : undefined,
+                  }}
+                />
+                <strong style={{ fontSize: 14, color: "#f8fafc" }}>
+                  {driver.hasGps
+                    ? (driver.locationStale ? "GPS Signal Stale (>30m threshold)" : "Live GPS Location")
+                    : "No GPS Recorded"}
+                </strong>
+              </div>
+              <span style={{ fontSize: 12, color: "#94a3b8" }}>{driver.gpsUpdatedAt || driver.activity}</span>
+            </div>
+
+            {driver.locationStale && (
+              <div
+                style={{
+                  background: "rgba(245, 158, 11, 0.1)",
+                  border: "1px solid #f59e0b",
+                  borderRadius: 6,
+                  padding: "8px 12px",
+                  fontSize: 12,
+                  color: "#fbbf24",
+                  marginBottom: 12,
+                }}
+              >
+                ⚠️ Notice: GPS location was updated more than 30 minutes ago. Coordinates may not reflect driver's real-time position.
+              </div>
+            )}
+
+            {driver.hasGps && driver.latitude && driver.longitude ? (
+              <>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 14 }}>
+                  <div style={{ background: "#1e293b", padding: 10, borderRadius: 6 }}>
+                    <div style={{ fontSize: 11, color: "#94a3b8" }}>LATITUDE / LONGITUDE</div>
+                    <div style={{ fontSize: 13, fontFamily: "monospace", color: "#f8fafc", fontWeight: "bold" }}>
+                      {driver.latitude.toFixed(6)}° N, {driver.longitude.toFixed(6)}° E
+                    </div>
+                  </div>
+                  <div style={{ background: "#1e293b", padding: 10, borderRadius: 6 }}>
+                    <div style={{ fontSize: 11, color: "#94a3b8" }}>SPEED & ACCURACY</div>
+                    <div style={{ fontSize: 13, color: "#f8fafc", fontWeight: "bold" }}>
+                      {driver.speed || 0} km/h · ±{driver.accuracy || 5}m
+                    </div>
+                  </div>
+                </div>
+
+                {/* SVG Visual Map Preview for Selected Driver */}
+                <div
+                  style={{
+                    height: 180,
+                    background: "#090d16",
+                    borderRadius: 8,
+                    overflow: "hidden",
+                    border: "1px solid #1e293b",
+                    position: "relative",
+                  }}
+                >
+                  <svg width="100%" height="100%" viewBox="0 0 500 180" style={{ display: "block" }}>
+                    <defs>
+                      <pattern id="grid" width="25" height="25" patternUnits="userSpaceOnUse">
+                        <path d="M 25 0 L 0 0 0 25" fill="none" stroke="#1e293b" strokeWidth="0.5" />
+                      </pattern>
+                      <linearGradient id="routeGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+                        <stop offset="0%" stopColor="#38bdf8" />
+                        <stop offset="100%" stopColor="#22c55e" />
+                      </linearGradient>
+                    </defs>
+                    <rect width="100%" height="100%" fill="#090d16" />
+                    <rect width="100%" height="100%" fill="url(#grid)" opacity="0.6" />
+
+                    {/* Road paths */}
+                    <path d="M 0 90 Q 150 40 250 90 T 500 90" fill="none" stroke="#334155" strokeWidth="6" strokeLinecap="round" />
+                    <path d="M 250 0 L 250 180" fill="none" stroke="#334155" strokeWidth="4" />
+                    <path d="M 120 180 L 120 0" fill="none" stroke="#1e293b" strokeWidth="3" />
+                    <path d="M 380 180 L 380 0" fill="none" stroke="#1e293b" strokeWidth="3" />
+
+                    {/* Active Route if Order assigned */}
+                    {driver.order !== "—" && (
+                      <>
+                        <path
+                          d="M 160 85 Q 210 65 250 90 T 360 90"
+                          fill="none"
+                          stroke="url(#routeGrad)"
+                          strokeWidth="3.5"
+                          strokeDasharray="6,4"
+                        />
+                        {/* Destination Pin */}
+                        <circle cx="360" cy="90" r="10" fill="#22c55e" fillOpacity="0.2" />
+                        <circle cx="360" cy="90" r="5" fill="#22c55e" />
+                        <text x="360" y="115" fill="#94a3b8" fontSize="11" textAnchor="middle">
+                          Dropoff Point
+                        </text>
+                      </>
+                    )}
+
+                    {/* Driver Vehicle Location Pin */}
+                    <circle cx="160" cy="85" r="16" fill="#38bdf8" fillOpacity="0.2">
+                      <animate attributeName="r" values="10;20;10" dur="2s" repeatCount="indefinite" />
+                    </circle>
+                    <circle cx="160" cy="85" r="6" fill="#38bdf8" stroke="#ffffff" strokeWidth="2" />
+                    <text x="160" y="62" fill="#38bdf8" fontSize="11" fontWeight="bold" textAnchor="middle">
+                      {driver.id} ({driver.name.split(" ")[0]})
+                    </text>
+                  </svg>
+                  <div
+                    style={{
+                      position: "absolute",
+                      bottom: 8,
+                      right: 10,
+                      background: "rgba(15, 23, 42, 0.85)",
+                      padding: "2px 8px",
+                      borderRadius: 4,
+                      fontSize: 10,
+                      color: "#94a3b8",
+                      fontFamily: "monospace",
+                    }}
+                  >
+                    GPS: {driver.latitude.toFixed(4)}, {driver.longitude.toFixed(4)}
+                  </div>
+                </div>
+              </>
+            ) : (
+              <div
+                style={{
+                  background: "#1e293b",
+                  borderRadius: 6,
+                  padding: 16,
+                  textAlign: "center",
+                  color: "#94a3b8",
+                  fontSize: 13,
+                }}
+              >
+                No GPS coordinates recorded for this driver. When the driver activates their location in the driver app, live position and transit route will display here.
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="modal-foot">
+          <Button variant="secondary" onClick={() => alert("Connecting dispatch call to " + driver.phone + "...")}>
+            Call Driver ({driver.phone})
+          </Button>
+          <Button variant="primary" onClick={close}>
+            Close
+          </Button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function DriversPage({ openOrder }: { openOrder?: (id: string) => void }) {
+  const [search, setSearch] = useState("")
+  const [statusFilter, setStatusFilter] = useState("ALL")
+  const [gpsFilter, setGpsFilter] = useState("ALL")
+  const [orderFilter, setOrderFilter] = useState("ALL")
+  const [page, setPage] = useState(0)
+  const [selectedDriver, setSelectedDriver] = useState<DriverMonitoringItem | null>(null)
+
+  const pageSize = 5
+
+  const filtered = drivers.filter((d) => {
+    if (search.trim()) {
+      const q = search.toLowerCase()
+      const match =
+        d.name.toLowerCase().includes(q) ||
+        d.id.toLowerCase().includes(q) ||
+        d.phone.includes(q) ||
+        d.plate.toLowerCase().includes(q) ||
+        d.order.toLowerCase().includes(q)
+      if (!match) return false
+    }
+    if (statusFilter !== "ALL" && d.status !== statusFilter) return false
+    if (gpsFilter === "LIVE" && (!d.hasGps || d.locationStale)) return false
+    if (gpsFilter === "STALE" && (!d.hasGps || !d.locationStale)) return false
+    if (gpsFilter === "NONE" && d.hasGps) return false
+    if (orderFilter === "ACTIVE" && d.order === "—") return false
+    if (orderFilter === "IDLE" && d.order !== "—") return false
+    return true
+  })
+
+  const totalPages = Math.ceil(filtered.length / pageSize) || 1
+  const currentPage = Math.min(page, totalPages - 1)
+  const pagedList = filtered.slice(currentPage * pageSize, (currentPage + 1) * pageSize)
+
   return (
     <div className="page">
       <div className="page-title">
         <div>
-          <h1>Drivers</h1>
-          <p>Monitor driver availability, workload, and performance</p>
+          <h1>Driver Tracking & Monitoring</h1>
+          <p>Real-time location, operational status, and delivery assignments of fleet drivers (PB-046)</p>
         </div>
         <Button icon="download">Export</Button>
       </div>
+
       <div className="summary-strip driver-strip">
         {[
           ["Available", "138", "success"],
@@ -967,8 +1362,82 @@ function DriversPage() {
           </div>
         ))}
       </div>
+
       <section className="panel table-panel">
-        <FilterBar search="Search driver name or ID" />
+        <div className="filterbar">
+          <label className="table-search">
+            <Icon name="search" size={16} />
+            <input
+              placeholder="Search driver name, ID, phone, plate, or order"
+              value={search}
+              onChange={(e) => {
+                setSearch(e.target.value)
+                setPage(0)
+              }}
+            />
+          </label>
+
+          <select
+            className="filter-control"
+            value={statusFilter}
+            onChange={(e) => {
+              setStatusFilter(e.target.value)
+              setPage(0)
+            }}
+            style={{ background: "#1e293b", color: "#f8fafc", border: "1px solid #334155", borderRadius: 6, padding: "6px 10px" }}
+          >
+            <option value="ALL">Status: All</option>
+            <option value="AVAILABLE">Available</option>
+            <option value="BUSY">Busy</option>
+            <option value="OFFLINE">Offline</option>
+            <option value="SUSPENDED">Suspended</option>
+          </select>
+
+          <select
+            className="filter-control hide-small"
+            value={gpsFilter}
+            onChange={(e) => {
+              setGpsFilter(e.target.value)
+              setPage(0)
+            }}
+            style={{ background: "#1e293b", color: "#f8fafc", border: "1px solid #334155", borderRadius: 6, padding: "6px 10px" }}
+          >
+            <option value="ALL">GPS: All</option>
+            <option value="LIVE">Live GPS</option>
+            <option value="STALE">Stale GPS (&gt;30m)</option>
+            <option value="NONE">No GPS Signal</option>
+          </select>
+
+          <select
+            className="filter-control hide-small"
+            value={orderFilter}
+            onChange={(e) => {
+              setOrderFilter(e.target.value)
+              setPage(0)
+            }}
+            style={{ background: "#1e293b", color: "#f8fafc", border: "1px solid #334155", borderRadius: 6, padding: "6px 10px" }}
+          >
+            <option value="ALL">Order: All</option>
+            <option value="ACTIVE">With Active Order</option>
+            <option value="IDLE">Idle / No Order</option>
+          </select>
+
+          {(search || statusFilter !== "ALL" || gpsFilter !== "ALL" || orderFilter !== "ALL") && (
+            <Button
+              variant="secondary"
+              onClick={() => {
+                setSearch("")
+                setStatusFilter("ALL")
+                setGpsFilter("ALL")
+                setOrderFilter("ALL")
+                setPage(0)
+              }}
+            >
+              Reset
+            </Button>
+          )}
+        </div>
+
         <div className="table-wrap">
           <table>
             <thead>
@@ -976,54 +1445,167 @@ function DriversPage() {
                 <th>Driver</th>
                 <th>Status</th>
                 <th>Current order</th>
+                <th>Real-time GPS Location</th>
+                <th>Vehicle & Plate</th>
                 <th>Workload</th>
-                <th>Vehicle</th>
-                <th>Last activity</th>
-                <th>Completed today</th>
-                <th>Failed today</th>
-                <th />
+                <th>Today</th>
+                <th>Action</th>
               </tr>
             </thead>
             <tbody>
-              {drivers.map((d) => (
-                <tr key={d.id}>
-                  <td>
-                    <div className="driver-cell">
-                      <div className="avatar small">
-                        {d.name
-                          .split(" ")
-                          .map((n) => n[0])
-                          .join("")}
-                      </div>
-                      <div>
-                        <strong>{d.name}</strong>
-                        <small>{d.id}</small>
-                      </div>
-                    </div>
-                  </td>
-                  <td>
-                    <Badge>{d.status}</Badge>
-                  </td>
-                  <td>
-                    <span className={d.order !== "—" ? "link" : ""}>
-                      {d.order}
-                    </span>
-                  </td>
-                  <td>{d.workload}</td>
-                  <td>{d.vehicle}</td>
-                  <td>{d.activity}</td>
-                  <td>{d.completed}</td>
-                  <td>{d.failed}</td>
-                  <td>
-                    <Icon name="dots" />
+              {pagedList.length === 0 ? (
+                <tr>
+                  <td colSpan={8} style={{ textAlign: "center", padding: "32px 16px", color: "#94a3b8" }}>
+                    No drivers match the current filters or search query.
                   </td>
                 </tr>
-              ))}
+              ) : (
+                pagedList.map((d) => (
+                  <tr key={d.id} style={{ cursor: "pointer" }} onClick={() => setSelectedDriver(d)}>
+                    <td>
+                      <div className="driver-cell">
+                        <div className="avatar small">
+                          {d.name
+                            .split(" ")
+                            .map((n) => n[0])
+                            .join("")}
+                        </div>
+                        <div>
+                          <strong>{d.name}</strong>
+                          <small>{d.id} · {d.phone}</small>
+                        </div>
+                      </div>
+                    </td>
+                    <td>
+                      <Badge>{d.status}</Badge>
+                    </td>
+                    <td>
+                      {d.order !== "—" ? (
+                        <div>
+                          <span
+                            className="link"
+                            style={{ fontWeight: "bold" }}
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              if (openOrder) openOrder(d.order)
+                            }}
+                          >
+                            {d.order}
+                          </span>
+                          <span style={{ marginLeft: 6, fontSize: 11, color: "#94a3b8" }}>
+                            ({d.orderStatus || "IN_TRANSIT"})
+                          </span>
+                        </div>
+                      ) : (
+                        <span style={{ color: "#64748b" }}>—</span>
+                      )}
+                    </td>
+                    <td>
+                      {d.hasGps && d.latitude && d.longitude ? (
+                        <div>
+                          <span
+                            style={{
+                              display: "inline-flex",
+                              alignItems: "center",
+                              gap: 6,
+                              fontSize: 12,
+                              color: d.locationStale ? "#f59e0b" : "#22c55e",
+                              fontWeight: 600,
+                            }}
+                          >
+                            <span
+                              style={{
+                                width: 8,
+                                height: 8,
+                                borderRadius: "50%",
+                                background: d.locationStale ? "#f59e0b" : "#22c55e",
+                              }}
+                            />
+                            {d.locationStale ? "Stale GPS" : "Live GPS"}
+                          </span>
+                          <div style={{ fontSize: 11, fontFamily: "monospace", color: "#94a3b8" }}>
+                            {d.latitude.toFixed(4)}, {d.longitude.toFixed(4)} ({d.gpsUpdatedAt})
+                          </div>
+                        </div>
+                      ) : (
+                        <span style={{ fontSize: 12, color: "#64748b" }}>No GPS signal</span>
+                      )}
+                    </td>
+                    <td>
+                      <div>{d.vehicle}</div>
+                      <small style={{ color: "#94a3b8" }}>{d.plate}</small>
+                    </td>
+                    <td>{d.workload}</td>
+                    <td>
+                      <span style={{ color: "#22c55e", fontWeight: "bold" }}>{d.completed}</span>
+                      {d.failed > 0 && <span style={{ color: "#ef4444", marginLeft: 4 }}>/ {d.failed} ✗</span>}
+                    </td>
+                    <td>
+                      <Button
+                        variant="secondary"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          setSelectedDriver(d)
+                        }}
+                      >
+                        Track
+                      </Button>
+                    </td>
+                  </tr>
+                ))
+              )}
             </tbody>
           </table>
         </div>
-        <Pagination label="Showing 1–7 of 493" />
+
+        <div className="pagination" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px" }}>
+          <span style={{ fontSize: 13, color: "#94a3b8" }}>
+            Showing {filtered.length === 0 ? 0 : currentPage * pageSize + 1}–
+            {Math.min((currentPage + 1) * pageSize, filtered.length)} of {filtered.length} drivers
+          </span>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <button
+              disabled={currentPage === 0}
+              onClick={() => setPage((p) => Math.max(0, p - 1))}
+              style={{
+                background: "#1e293b",
+                border: "1px solid #334155",
+                color: currentPage === 0 ? "#475569" : "#f8fafc",
+                borderRadius: 4,
+                padding: "4px 10px",
+                cursor: currentPage === 0 ? "not-allowed" : "pointer",
+              }}
+            >
+              ‹ Prev
+            </button>
+            <span style={{ fontSize: 12, color: "#94a3b8" }}>
+              Page {currentPage + 1} / {totalPages}
+            </span>
+            <button
+              disabled={currentPage >= totalPages - 1}
+              onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
+              style={{
+                background: "#1e293b",
+                border: "1px solid #334155",
+                color: currentPage >= totalPages - 1 ? "#475569" : "#f8fafc",
+                borderRadius: 4,
+                padding: "4px 10px",
+                cursor: currentPage >= totalPages - 1 ? "not-allowed" : "pointer",
+              }}
+            >
+              Next ›
+            </button>
+          </div>
+        </div>
       </section>
+
+      {selectedDriver && (
+        <DriverDetailModal
+          driver={selectedDriver}
+          close={() => setSelectedDriver(null)}
+          openOrder={openOrder}
+        />
+      )}
     </div>
   )
 }
@@ -1358,10 +1940,12 @@ function OrderDetail({
   id,
   back,
   assign,
+  track,
 }: {
   id: string
   back: () => void
   assign: () => void
+  track: () => void
 }) {
   const failed = id.endsWith("8842") || id.endsWith("8818")
   return (
@@ -1378,14 +1962,21 @@ function OrderDetail({
           </div>
           <p>Created today at 10:42 · Express delivery</p>
         </div>
-        <div>
+        <div style={{ display: "flex", gap: 8 }}>
           <Button>Cancel order</Button>
+          {!failed && (
+            <Button variant="primary" icon="pin" onClick={track}>
+              Track Driver GPS
+            </Button>
+          )}
           {failed ? (
-            <Button variant="primary" icon="user" onClick={assign}>
-              Assign driver
+            <Button variant="primary" icon="route" onClick={assign}>
+              Reassign driver
             </Button>
           ) : (
-            <Button icon="route">Reassign driver</Button>
+            <Button icon="route" onClick={assign}>
+              Reassign driver
+            </Button>
           )}
         </div>
       </div>
@@ -1394,15 +1985,14 @@ function OrderDetail({
           <div>
             <Icon name="alert" />
             <div>
-              <strong>Automatic assignment failed after 3 attempts</strong>
+              <strong>Order Delivery Failed — Dispatcher Action Required</strong>
               <span>
-                No candidate driver accepted within the configured response
-                window. Dispatcher intervention is recommended.
+                Failure reason: Recipient unavailable at delivery address. Current driver was released; please select a replacement eligible driver to reassign and resume delivery.
               </span>
             </div>
           </div>
-          <Button variant="danger" onClick={assign}>
-            Assign driver
+          <Button variant="danger" icon="route" onClick={assign}>
+            Reassign driver
           </Button>
         </div>
       )}
@@ -1583,15 +2173,16 @@ function OrderDetail({
   )
 }
 
-function AssignModal({ close }: { close: () => void }) {
+function AssignModal({ close, orderId }: { close: () => void; orderId?: string | null }) {
   const [selected, setSelected] = useState("DRV-0881")
+  const isFailed = orderId ? (orderId.endsWith("8842") || orderId.endsWith("8818")) : false
   return (
     <div className="modal-backdrop">
       <div className="modal">
         <div className="modal-head">
           <div>
-            <h2>Assign driver manually</h2>
-            <p>Order SXP-240519-8842 · Pickup at Westgate Mall</p>
+            <h2>{isFailed ? "Reassign driver for failed order" : "Assign driver manually"}</h2>
+            <p>Order {orderId || "SXP-240519-8818"} · Hub to Destination</p>
           </div>
           <button className="icon-button" onClick={close}>
             <Icon name="close" />
@@ -1600,8 +2191,9 @@ function AssignModal({ close }: { close: () => void }) {
         <div className="modal-notice">
           <Icon name="alert" size={17} />
           <span>
-            Manual assignment overrides the automatic assignment workflow. The
-            selected driver will receive an immediate request.
+            {isFailed
+              ? "Reassigning this failed order will release the previous driver, reset delivery state, and assign the newly selected driver to resume delivery."
+              : "Manual assignment overrides the automatic assignment workflow. The selected driver will receive an immediate request."}
           </span>
         </div>
         <div className="modal-tools">
@@ -1704,10 +2296,181 @@ function AssignModal({ close }: { close: () => void }) {
   )
 }
 
+function TrackDriverModal({
+  orderId,
+  close,
+}: {
+  orderId: string
+  close: () => void
+}) {
+  const [copied, setCopied] = useState(false)
+  const isFailed = orderId.endsWith("8842") || orderId.endsWith("8818")
+
+  return (
+    <div className="modal-backdrop">
+      <div className="modal" style={{ maxWidth: 640 }}>
+        <div className="modal-head">
+          <div>
+            <h2>Live Driver Tracking: {orderId}</h2>
+            <p>Real-time GPS coordinates of assigned driver for this order</p>
+          </div>
+          <button className="icon-btn" onClick={close}>
+            ✕
+          </button>
+        </div>
+
+        {isFailed ? (
+          <div className="modal-notice" style={{ background: "rgba(239, 68, 68, 0.1)", borderColor: "#ef4444" }}>
+            <Icon name="alert" />
+            <div>
+              <strong>Tracking Not Available</strong>
+              <span>This order has failed delivery or driver has been released. Live tracking is inactive.</span>
+            </div>
+          </div>
+        ) : (
+          <div style={{ padding: "16px 24px" }}>
+            <div
+              style={{
+                background: "#0f172a",
+                borderRadius: 12,
+                padding: 16,
+                marginBottom: 16,
+                border: "1px solid #334155",
+                position: "relative",
+                overflow: "hidden",
+              }}
+            >
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 12 }}>
+                <span
+                  style={{
+                    fontSize: 12,
+                    color: "#22c55e",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 6,
+                    fontWeight: 600,
+                  }}
+                >
+                  <span
+                    style={{
+                      width: 8,
+                      height: 8,
+                      borderRadius: "50%",
+                      background: "#22c55e",
+                      display: "inline-block",
+                    }}
+                  ></span>
+                  LIVE GPS FIX · Active Delivery
+                </span>
+                <span style={{ fontSize: 12, color: "#94a3b8" }}>Last ping: 2 mins ago (Fresh)</span>
+              </div>
+
+              {/* Vector Map Preview */}
+              <svg
+                width="100%"
+                height="160"
+                viewBox="0 0 500 160"
+                style={{ background: "#1e293b", borderRadius: 8 }}
+              >
+                <defs>
+                  <linearGradient id="routeGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+                    <stop offset="0%" stopColor="#3b82f6" />
+                    <stop offset="60%" stopColor="#10b981" />
+                    <stop offset="100%" stopColor="#94a3b8" />
+                  </linearGradient>
+                </defs>
+                <path
+                  d="M 60 110 Q 180 30, 290 85 T 440 50"
+                  fill="none"
+                  stroke="url(#routeGrad)"
+                  strokeWidth="4"
+                  strokeDasharray="6 4"
+                />
+                <circle cx="60" cy="110" r="8" fill="#3b82f6" />
+                <text x="35" y="135" fill="#93c5fd" fontSize="11" fontWeight="600">
+                  Hub (Pickup)
+                </text>
+                <circle cx="290" cy="85" r="14" fill="rgba(16, 185, 129, 0.3)" />
+                <circle cx="290" cy="85" r="8" fill="#10b981" />
+                <text x="255" y="70" fill="#6ee7b7" fontSize="12" fontWeight="bold">
+                  🚚 Driver (28.5 km/h)
+                </text>
+                <circle cx="440" cy="50" r="8" fill="#f59e0b" />
+                <text x="390" y="35" fill="#fcd34d" fontSize="11" fontWeight="600">
+                  Customer Dest
+                </text>
+              </svg>
+
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "1fr 1fr",
+                  gap: 12,
+                  marginTop: 14,
+                }}
+              >
+                <div style={{ background: "#1e293b", padding: 10, borderRadius: 8 }}>
+                  <div style={{ fontSize: 11, color: "#94a3b8" }}>CURRENT COORDINATES</div>
+                  <div
+                    style={{
+                      fontSize: 14,
+                      fontWeight: "bold",
+                      color: "#f8fafc",
+                      fontFamily: "monospace",
+                    }}
+                  >
+                    21.028511° N, 105.854444° E
+                  </div>
+                </div>
+                <div style={{ background: "#1e293b", padding: 10, borderRadius: 8 }}>
+                  <div style={{ fontSize: 11, color: "#94a3b8" }}>STATUS & ACCURACY</div>
+                  <div style={{ fontSize: 14, fontWeight: "bold", color: "#f8fafc" }}>
+                    IN_TRANSIT · ± 4.5m
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                fontSize: 13,
+                color: "#64748b",
+              }}
+            >
+              <span>
+                Assigned Driver: <strong>T. Nguyen (DRV-0821)</strong>
+              </span>
+              <button
+                className="btn btn-secondary"
+                style={{ padding: "4px 10px", fontSize: 12 }}
+                onClick={() => {
+                  navigator.clipboard?.writeText("21.028511, 105.854444")
+                  setCopied(true)
+                  setTimeout(() => setCopied(false), 2000)
+                }}
+              >
+                {copied ? "✓ Copied GPS" : "Copy Coordinates"}
+              </button>
+            </div>
+          </div>
+        )}
+
+        <div className="modal-foot">
+          <Button onClick={close}>Close</Button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export default function App() {
   const [page, setPage] = useState<Page>("Dashboard")
   const [order, setOrder] = useState<string | null>(null)
   const [modal, setModal] = useState(false)
+  const [trackModal, setTrackModal] = useState(false)
   const openOrder = (id: string) => setOrder(id)
   let content: ReactNode
   if (order)
@@ -1716,6 +2479,7 @@ export default function App() {
         id={order}
         back={() => setOrder(null)}
         assign={() => setModal(true)}
+        track={() => setTrackModal(true)}
       />
     )
   else if (page === "Dashboard")
@@ -1730,7 +2494,7 @@ export default function App() {
     content = (
       <AssignmentPage openModal={() => setModal(true)} openOrder={openOrder} />
     )
-  else if (page === "Drivers") content = <DriversPage />
+  else if (page === "Drivers") content = <DriversPage openOrder={openOrder} />
   else if (page === "Exceptions")
     content = <ExceptionsPage openOrder={openOrder} />
   else if (page === "Reports") content = <ReportsPage />
@@ -1744,7 +2508,11 @@ export default function App() {
       }}
     >
       {content}
-      {modal && <AssignModal close={() => setModal(false)} />}
+      {modal && <AssignModal close={() => setModal(false)} orderId={order} />}
+      {trackModal && order && (
+        <TrackDriverModal close={() => setTrackModal(false)} orderId={order} />
+      )}
     </AppShell>
   )
 }
+

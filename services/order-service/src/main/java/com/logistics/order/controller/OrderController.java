@@ -64,6 +64,17 @@ public class OrderController {
         return Response.ok(ApiResponse.ok("Order details retrieved successfully", order)).build();
     }
 
+    @GET
+    @Path("/{id}/tracking")
+    public Response getOrderTracking(
+            @HeaderParam("Authorization") String authHeader,
+            @PathParam("id") String id,
+            @QueryParam("allowStale") @DefaultValue("false") boolean allowStale) {
+        com.logistics.common.dto.OrderTrackingDto tracking = orderService.getOrderTracking(authHeader, id, allowStale);
+        return Response.ok(ApiResponse.ok("Order driver location retrieved successfully", tracking)).build();
+    }
+
+
     @POST
     public Response createOrder(
             @HeaderParam("Authorization") String authHeader,

@@ -26,6 +26,12 @@ public class UnassignedOrderDto {
     private Instant createdAt;
     private Instant updatedAt;
 
+    private String driverId;
+    private String previousDriverId;
+    private Instant failedAt;
+    private String failureReason;
+    private String failureNotes;
+
     public UnassignedOrderDto() {
     }
 
@@ -34,6 +40,17 @@ public class UnassignedOrderDto {
                               String dropoffAddress, BigDecimal totalAmount, AssignmentStatus status,
                               String unassignedReason, Instant unassignedAt, Long waitingTimeSeconds,
                               String notes, Instant createdAt, Instant updatedAt) {
+        this(assignmentId, orderId, orderNumber, customerId, recipientName, recipientPhone, pickupAddress,
+                dropoffAddress, totalAmount, status, unassignedReason, unassignedAt, waitingTimeSeconds,
+                notes, null, null, null, null, null, createdAt, updatedAt);
+    }
+
+    public UnassignedOrderDto(String assignmentId, String orderId, String orderNumber, String customerId,
+                              String recipientName, String recipientPhone, String pickupAddress,
+                              String dropoffAddress, BigDecimal totalAmount, AssignmentStatus status,
+                              String unassignedReason, Instant unassignedAt, Long waitingTimeSeconds,
+                              String notes, String driverId, String previousDriverId, Instant failedAt,
+                              String failureReason, String failureNotes, Instant createdAt, Instant updatedAt) {
         this.assignmentId = assignmentId;
         this.orderId = orderId;
         this.orderNumber = orderNumber;
@@ -48,6 +65,11 @@ public class UnassignedOrderDto {
         this.unassignedAt = unassignedAt;
         this.waitingTimeSeconds = waitingTimeSeconds;
         this.notes = notes;
+        this.driverId = driverId;
+        this.previousDriverId = previousDriverId;
+        this.failedAt = failedAt;
+        this.failureReason = failureReason;
+        this.failureNotes = failureNotes;
         this.createdAt = createdAt;
         this.updatedAt = updatedAt;
     }
@@ -59,7 +81,7 @@ public class UnassignedOrderDto {
 
         Instant waitReference = assignment.getUnassignedAt() != null
                 ? assignment.getUnassignedAt()
-                : assignment.getCreatedAt();
+                : (assignment.getFailedAt() != null ? assignment.getFailedAt() : assignment.getCreatedAt());
         Long waitingSeconds = waitReference != null
                 ? Math.max(0, Duration.between(waitReference, Instant.now()).getSeconds())
                 : null;
@@ -83,6 +105,11 @@ public class UnassignedOrderDto {
                 assignment.getUnassignedAt(),
                 waitingSeconds,
                 assignment.getNotes(),
+                assignment.getDriverId(),
+                assignment.getPreviousDriverId(),
+                assignment.getFailedAt(),
+                assignment.getFailureReason(),
+                assignment.getFailureNotes(),
                 assignment.getCreatedAt(),
                 assignment.getUpdatedAt()
         );
@@ -215,4 +242,45 @@ public class UnassignedOrderDto {
     public void setUpdatedAt(Instant updatedAt) {
         this.updatedAt = updatedAt;
     }
+
+    public String getDriverId() {
+        return driverId;
+    }
+
+    public void setDriverId(String driverId) {
+        this.driverId = driverId;
+    }
+
+    public String getPreviousDriverId() {
+        return previousDriverId;
+    }
+
+    public void setPreviousDriverId(String previousDriverId) {
+        this.previousDriverId = previousDriverId;
+    }
+
+    public Instant getFailedAt() {
+        return failedAt;
+    }
+
+    public void setFailedAt(Instant failedAt) {
+        this.failedAt = failedAt;
+    }
+
+    public String getFailureReason() {
+        return failureReason;
+    }
+
+    public void setFailureReason(String failureReason) {
+        this.failureReason = failureReason;
+    }
+
+    public String getFailureNotes() {
+        return failureNotes;
+    }
+
+    public void setFailureNotes(String failureNotes) {
+        this.failureNotes = failureNotes;
+    }
 }
+

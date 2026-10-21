@@ -1,0 +1,17 @@
+databaseChangeLog:
+  - changeSet:
+      id: 011-add-delivery-fields-to-assignments
+      author: logistics-team
+      changes:
+        - addColumn:
+            tableName: assignments
+            columns:
+              - column:
+                  name: delivered_at
+                  type: TIMESTAMP WITH TIME ZONE
+              - column:
+                  name: delivery_notes
+                  type: VARCHAR(255)
+              - column:
+                  name: proof_of_delivery
+                  type: VARCHAR(255)

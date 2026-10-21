@@ -102,4 +102,40 @@ public class GlobalExceptionHandler {
                     .build();
         }
     }
+
+    @Provider
+    public static class TrackingServiceExceptionMapper implements ExceptionMapper<TrackingServiceException> {
+        @Override
+        public Response toResponse(TrackingServiceException exception) {
+            log.error("Tracking service failure: {}", exception.getMessage());
+            return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
+                    .type(MediaType.APPLICATION_JSON)
+                    .entity(ApiResponse.error("Tracking service error: " + exception.getMessage()))
+                    .build();
+        }
+    }
+
+    @Provider
+    public static class DriverDataProviderUnavailableMapper implements ExceptionMapper<DriverDataProviderUnavailableException> {
+        @Override
+        public Response toResponse(DriverDataProviderUnavailableException exception) {
+            log.error("Driver data provider unavailable: {}", exception.getMessage());
+            return Response.status(Response.Status.SERVICE_UNAVAILABLE)
+                    .type(MediaType.APPLICATION_JSON)
+                    .entity(ApiResponse.error("Driver data provider is currently unavailable: " + exception.getMessage()))
+                    .build();
+        }
+    }
+
+    @Provider
+    public static class DriverNotFoundMapper implements ExceptionMapper<DriverNotFoundException> {
+        @Override
+        public Response toResponse(DriverNotFoundException exception) {
+            log.warn("Driver not found: {}", exception.getMessage());
+            return Response.status(Response.Status.NOT_FOUND)
+                    .type(MediaType.APPLICATION_JSON)
+                    .entity(ApiResponse.error(exception.getMessage()))
+                    .build();
+        }
+    }
 }

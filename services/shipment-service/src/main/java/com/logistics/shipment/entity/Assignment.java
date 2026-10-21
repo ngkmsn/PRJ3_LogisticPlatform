@@ -83,6 +83,36 @@ public class Assignment extends PanacheEntityBase {
     @Column(name = "reassigned_by", length = 100)
     private String reassignedBy;
 
+    @Column(name = "picked_up_at")
+    private Instant pickedUpAt;
+
+    @Column(name = "pickup_notes", length = 255)
+    private String pickupNotes;
+
+    @Column(name = "transit_started_at")
+    private Instant transitStartedAt;
+
+    @Column(name = "transit_notes", length = 255)
+    private String transitNotes;
+
+    @Column(name = "delivered_at")
+    private Instant deliveredAt;
+
+    @Column(name = "delivery_notes", length = 255)
+    private String deliveryNotes;
+
+    @Column(name = "proof_of_delivery", length = 255)
+    private String proofOfDelivery;
+
+    @Column(name = "failed_at")
+    private Instant failedAt;
+
+    @Column(name = "failure_reason", length = 255)
+    private String failureReason;
+
+    @Column(name = "failure_notes", length = 255)
+    private String failureNotes;
+
     @Column(name = "notes", columnDefinition = "TEXT")
     private String notes;
 
@@ -298,6 +328,86 @@ public class Assignment extends PanacheEntityBase {
 
     public void setUpdatedAt(Instant updatedAt) {
         this.updatedAt = updatedAt;
+    }
+
+    public Instant getPickedUpAt() {
+        return pickedUpAt;
+    }
+
+    public void setPickedUpAt(Instant pickedUpAt) {
+        this.pickedUpAt = pickedUpAt;
+    }
+
+    public String getPickupNotes() {
+        return pickupNotes;
+    }
+
+    public void setPickupNotes(String pickupNotes) {
+        this.pickupNotes = pickupNotes;
+    }
+
+    public Instant getTransitStartedAt() {
+        return transitStartedAt;
+    }
+
+    public void setTransitStartedAt(Instant transitStartedAt) {
+        this.transitStartedAt = transitStartedAt;
+    }
+
+    public String getTransitNotes() {
+        return transitNotes;
+    }
+
+    public void setTransitNotes(String transitNotes) {
+        this.transitNotes = transitNotes;
+    }
+
+    public Instant getDeliveredAt() {
+        return deliveredAt;
+    }
+
+    public void setDeliveredAt(Instant deliveredAt) {
+        this.deliveredAt = deliveredAt;
+    }
+
+    public String getDeliveryNotes() {
+        return deliveryNotes;
+    }
+
+    public void setDeliveryNotes(String deliveryNotes) {
+        this.deliveryNotes = deliveryNotes;
+    }
+
+    public String getProofOfDelivery() {
+        return proofOfDelivery;
+    }
+
+    public void setProofOfDelivery(String proofOfDelivery) {
+        this.proofOfDelivery = proofOfDelivery;
+    }
+
+    public Instant getFailedAt() {
+        return failedAt;
+    }
+
+    public void setFailedAt(Instant failedAt) {
+        this.failedAt = failedAt;
+    }
+
+    public String getFailureReason() {
+        return failureReason;
+    }
+
+    public void setFailureReason(String failureReason) {
+        this.failureReason = failureReason;
+    }
+
+    public String getFailureNotes() {
+        return failureNotes;
+    }
+
+    public void setFailureNotes(String failureNotes) {
+        this.failureNotes = failureNotes;
     }
 
     @Override
