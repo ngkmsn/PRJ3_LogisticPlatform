@@ -59,6 +59,27 @@ public class ShipmentAssignmentResource {
         return assignmentController.getFailedOrderDetail(authHeader, orderId);
     }
 
+    @GET
+    @Path("/actionable")
+    public Response getActionableOrders(
+            @HeaderParam("Authorization") String authHeader,
+            @QueryParam("category") @DefaultValue("ALL") String category,
+            @QueryParam("status") String status,
+            @QueryParam("search") String search,
+            @QueryParam("page") @DefaultValue("0") int page,
+            @QueryParam("size") @DefaultValue("10") int size,
+            @QueryParam("sort") @DefaultValue("newest_first") String sort) {
+        return assignmentController.getActionableOrders(authHeader, category, status, search, page, size, sort);
+    }
+
+    @GET
+    @Path("/actionable/{orderId}")
+    public Response getActionableOrderDetail(
+            @HeaderParam("Authorization") String authHeader,
+            @PathParam("orderId") String orderId) {
+        return assignmentController.getActionableOrderDetail(authHeader, orderId);
+    }
+
     @jakarta.ws.rs.POST
     @Path("/{orderId}/manual-assign")
     public Response manualAssignDriver(

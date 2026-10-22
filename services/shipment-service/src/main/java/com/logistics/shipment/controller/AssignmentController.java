@@ -73,6 +73,31 @@ public class AssignmentController {
         return Response.ok(ApiResponse.ok("Failed order detail retrieved successfully", order)).build();
     }
 
+    @GET
+    @Path("/actionable")
+    public Response getActionableOrders(
+            @HeaderParam("Authorization") String authHeader,
+            @QueryParam("category") @DefaultValue("ALL") String category,
+            @QueryParam("status") String status,
+            @QueryParam("search") String search,
+            @QueryParam("page") @DefaultValue("0") int page,
+            @QueryParam("size") @DefaultValue("10") int size,
+            @QueryParam("sort") @DefaultValue("newest_first") String sort) {
+        com.logistics.common.dto.ActionableOrdersPageDto pagedOrders =
+                assignmentService.getActionableOrders(authHeader, category, status, search, page, size, sort);
+        return Response.ok(ApiResponse.ok("Actionable orders retrieved successfully", pagedOrders)).build();
+    }
+
+    @GET
+    @Path("/actionable/{orderId}")
+    public Response getActionableOrderDetail(
+            @HeaderParam("Authorization") String authHeader,
+            @PathParam("orderId") String orderId) {
+        com.logistics.common.dto.ActionableOrderDto order =
+                assignmentService.getActionableOrderDetail(authHeader, orderId);
+        return Response.ok(ApiResponse.ok("Actionable order detail retrieved successfully", order)).build();
+    }
+
     @POST
     @Path("/{orderId}/manual-assign")
     public Response manualAssignDriver(

@@ -19,6 +19,8 @@ public class OrderDeliveredPayload {
     private String deliveryNotes;
     private String proofOfDelivery;
     private String recipientSignature;
+    private String recipientName;
+    private String recipientPhone;
     private String deliveryAddress;
     private BigDecimal totalAmount;
     private String notes;
@@ -31,10 +33,23 @@ public class OrderDeliveredPayload {
                                  Instant deliveredAt, String deliveryNotes, String proofOfDelivery,
                                  String recipientSignature, String deliveryAddress,
                                  BigDecimal totalAmount, String notes) {
+        this(assignmentId, orderId, orderNumber, customerId, null, null, driverId, status,
+             deliveredAt, deliveryNotes, proofOfDelivery, recipientSignature, deliveryAddress,
+             totalAmount, notes);
+    }
+
+    public OrderDeliveredPayload(String assignmentId, String orderId, String orderNumber,
+                                 String customerId, String recipientName, String recipientPhone,
+                                 String driverId, String status, Instant deliveredAt,
+                                 String deliveryNotes, String proofOfDelivery,
+                                 String recipientSignature, String deliveryAddress,
+                                 BigDecimal totalAmount, String notes) {
         this.assignmentId = assignmentId;
         this.orderId = orderId;
         this.orderNumber = orderNumber;
         this.customerId = customerId;
+        this.recipientName = recipientName;
+        this.recipientPhone = recipientPhone;
         this.driverId = driverId;
         this.status = status;
         this.deliveredAt = deliveredAt;
@@ -61,6 +76,8 @@ public class OrderDeliveredPayload {
         private String deliveryNotes;
         private String proofOfDelivery;
         private String recipientSignature;
+        private String recipientName;
+        private String recipientPhone;
         private String deliveryAddress;
         private BigDecimal totalAmount;
         private String notes;
@@ -82,6 +99,16 @@ public class OrderDeliveredPayload {
 
         public Builder customerId(String customerId) {
             this.customerId = customerId;
+            return this;
+        }
+
+        public Builder recipientName(String recipientName) {
+            this.recipientName = recipientName;
+            return this;
+        }
+
+        public Builder recipientPhone(String recipientPhone) {
+            this.recipientPhone = recipientPhone;
             return this;
         }
 
@@ -132,11 +159,27 @@ public class OrderDeliveredPayload {
 
         public OrderDeliveredPayload build() {
             return new OrderDeliveredPayload(
-                    assignmentId, orderId, orderNumber, customerId, driverId,
-                    status, deliveredAt, deliveryNotes, proofOfDelivery, recipientSignature,
+                    assignmentId, orderId, orderNumber, customerId, recipientName, recipientPhone,
+                    driverId, status, deliveredAt, deliveryNotes, proofOfDelivery, recipientSignature,
                     deliveryAddress, totalAmount, notes
             );
         }
+    }
+
+    public String getRecipientName() {
+        return recipientName;
+    }
+
+    public void setRecipientName(String recipientName) {
+        this.recipientName = recipientName;
+    }
+
+    public String getRecipientPhone() {
+        return recipientPhone;
+    }
+
+    public void setRecipientPhone(String recipientPhone) {
+        this.recipientPhone = recipientPhone;
     }
 
     public String getAssignmentId() {

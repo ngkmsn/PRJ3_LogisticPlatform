@@ -1,5 +1,7 @@
 package com.logistics.shipment.service;
 
+import com.logistics.common.dto.ActionableOrderDto;
+import com.logistics.common.dto.ActionableOrdersPageDto;
 import com.logistics.common.security.AuthPrincipal;
 import com.logistics.common.security.JwtTokenProvider;
 import com.logistics.common.security.Role;
@@ -1272,6 +1274,26 @@ public class DefaultAssignmentService implements AssignmentService {
                 .orElseThrow(() -> new AssignmentNotFoundException("No failed order found with orderId: " + orderId));
 
         return FailedOrderDto.from(assignment);
+    }
+
+    @Override
+    public ActionableOrdersPageDto getActionableOrders(String authHeader, String category, String status, String search, int page, int size, String sort) {
+        resolveAuthenticatedOperations(authHeader, "view actionable orders");
+        return assignmentRepository.findActionableOrders(category, status, search, page, size, sort);
+    }
+
+    @Override
+    public ActionableOrderDto getActionableOrderDetail(String authHeader, String orderId) {
+        resolveAuthenticatedOperations(authHeader, "view actionable order detail");
+
+        if (orderId == null || orderId.trim().isEmpty()) {
+            throw new IllegalArgumentException("orderId must not be null or empty");
+        }
+
+        Assignment assignment = assignmentRepository.findActionableByOrderId(orderId.trim())
+                .orElseThrow(() -> new AssignmentNotFoundException("No actionable order found with orderId: " + orderId));
+
+        return AssignmentRepository.toActionableDto(assignment);
     }
 }
 

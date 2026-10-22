@@ -13,6 +13,8 @@ public class OrderFailedPayload {
     private String orderId;
     private String orderNumber;
     private String customerId;
+    private String recipientName;
+    private String recipientPhone;
     private String driverId;
     private String status;
     private Instant failedAt;
@@ -29,10 +31,21 @@ public class OrderFailedPayload {
                               String customerId, String driverId, String status,
                               Instant failedAt, String failureReason, String failureNotes,
                               String deliveryAddress, BigDecimal totalAmount, String notes) {
+        this(assignmentId, orderId, orderNumber, customerId, null, null, driverId, status,
+             failedAt, failureReason, failureNotes, deliveryAddress, totalAmount, notes);
+    }
+
+    public OrderFailedPayload(String assignmentId, String orderId, String orderNumber,
+                              String customerId, String recipientName, String recipientPhone,
+                              String driverId, String status, Instant failedAt,
+                              String failureReason, String failureNotes,
+                              String deliveryAddress, BigDecimal totalAmount, String notes) {
         this.assignmentId = assignmentId;
         this.orderId = orderId;
         this.orderNumber = orderNumber;
         this.customerId = customerId;
+        this.recipientName = recipientName;
+        this.recipientPhone = recipientPhone;
         this.driverId = driverId;
         this.status = status;
         this.failedAt = failedAt;
@@ -52,6 +65,8 @@ public class OrderFailedPayload {
         private String orderId;
         private String orderNumber;
         private String customerId;
+        private String recipientName;
+        private String recipientPhone;
         private String driverId;
         private String status = "FAILED";
         private Instant failedAt;
@@ -78,6 +93,16 @@ public class OrderFailedPayload {
 
         public Builder customerId(String customerId) {
             this.customerId = customerId;
+            return this;
+        }
+
+        public Builder recipientName(String recipientName) {
+            this.recipientName = recipientName;
+            return this;
+        }
+
+        public Builder recipientPhone(String recipientPhone) {
+            this.recipientPhone = recipientPhone;
             return this;
         }
 
@@ -123,11 +148,27 @@ public class OrderFailedPayload {
 
         public OrderFailedPayload build() {
             return new OrderFailedPayload(
-                    assignmentId, orderId, orderNumber, customerId, driverId,
-                    status, failedAt, failureReason, failureNotes,
+                    assignmentId, orderId, orderNumber, customerId, recipientName, recipientPhone,
+                    driverId, status, failedAt, failureReason, failureNotes,
                     deliveryAddress, totalAmount, notes
             );
         }
+    }
+
+    public String getRecipientName() {
+        return recipientName;
+    }
+
+    public void setRecipientName(String recipientName) {
+        this.recipientName = recipientName;
+    }
+
+    public String getRecipientPhone() {
+        return recipientPhone;
+    }
+
+    public void setRecipientPhone(String recipientPhone) {
+        this.recipientPhone = recipientPhone;
     }
 
     public String getAssignmentId() {

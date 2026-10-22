@@ -13,6 +13,8 @@ public class DriverAssignedPayload {
     private String orderId;
     private String orderNumber;
     private String customerId;
+    private String recipientName;
+    private String recipientPhone;
     private String driverId;
     private String status;
     private Instant assignedAt;
@@ -24,13 +26,23 @@ public class DriverAssignedPayload {
     }
 
     public DriverAssignedPayload(String assignmentId, String orderId, String orderNumber,
-                                String customerId, String driverId, String status,
-                                Instant assignedAt, String deliveryAddress,
-                                BigDecimal totalAmount, String notes) {
+                                 String customerId, String driverId, String status,
+                                 Instant assignedAt, String deliveryAddress,
+                                 BigDecimal totalAmount, String notes) {
+        this(assignmentId, orderId, orderNumber, customerId, null, null, driverId, status,
+             assignedAt, deliveryAddress, totalAmount, notes);
+    }
+
+    public DriverAssignedPayload(String assignmentId, String orderId, String orderNumber,
+                                 String customerId, String recipientName, String recipientPhone,
+                                 String driverId, String status, Instant assignedAt,
+                                 String deliveryAddress, BigDecimal totalAmount, String notes) {
         this.assignmentId = assignmentId;
         this.orderId = orderId;
         this.orderNumber = orderNumber;
         this.customerId = customerId;
+        this.recipientName = recipientName;
+        this.recipientPhone = recipientPhone;
         this.driverId = driverId;
         this.status = status;
         this.assignedAt = assignedAt;
@@ -48,6 +60,8 @@ public class DriverAssignedPayload {
         private String orderId;
         private String orderNumber;
         private String customerId;
+        private String recipientName;
+        private String recipientPhone;
         private String driverId;
         private String status = "ASSIGNED";
         private Instant assignedAt;
@@ -72,6 +86,16 @@ public class DriverAssignedPayload {
 
         public Builder customerId(String customerId) {
             this.customerId = customerId;
+            return this;
+        }
+
+        public Builder recipientName(String recipientName) {
+            this.recipientName = recipientName;
+            return this;
+        }
+
+        public Builder recipientPhone(String recipientPhone) {
+            this.recipientPhone = recipientPhone;
             return this;
         }
 
@@ -107,10 +131,26 @@ public class DriverAssignedPayload {
 
         public DriverAssignedPayload build() {
             return new DriverAssignedPayload(
-                    assignmentId, orderId, orderNumber, customerId, driverId,
-                    status, assignedAt, deliveryAddress, totalAmount, notes
+                    assignmentId, orderId, orderNumber, customerId, recipientName, recipientPhone,
+                    driverId, status, assignedAt, deliveryAddress, totalAmount, notes
             );
         }
+    }
+
+    public String getRecipientName() {
+        return recipientName;
+    }
+
+    public void setRecipientName(String recipientName) {
+        this.recipientName = recipientName;
+    }
+
+    public String getRecipientPhone() {
+        return recipientPhone;
+    }
+
+    public void setRecipientPhone(String recipientPhone) {
+        this.recipientPhone = recipientPhone;
     }
 
     public String getAssignmentId() {

@@ -2823,6 +2823,365 @@ Hệ thống cung cấp giao diện và API tổng hợp dành riêng cho vai tr
 - Thẻ cảnh báo tác vụ cần chú ý (Operational Attention): Cảnh báo đơn chờ điều phối, đơn giao thất bại cần reassign, tài xế mất tín hiệu GPS.
 - Hỗ trợ đầy đủ trạng thái: Loading skeleton, Error banner với nút Thử lại (Retry), Màn hình 403 Access Denied khi không có quyền, Empty state, và Nút Làm mới dữ liệu tức thời (Bypass cache).
 
+
+---
+
+## Operations: Danh sách Order cần xử lý (PB-049)
+
+Hệ thống tập trung toàn bộ các đơn hàng chưa được phân công tài xế (`UNASSIGNED`) và các đơn hàng giao thất bại (`FAILED`) vào một hàng đợi tác nghiệp thống nhất dành cho vai trò Operations (`DISPATCHER`, `ADMIN`) để phát hiện và xử lý kịp thời.
+
+### 1. Kiến trúc & Nguyên tắc cốt lõi
+- **Authoritative Data Ownership**: Toàn bộ trạng thái điều phối và sự cố giao hàng được quản lý có thẩm quyền tại `shipment-service` (`assignments` table trong `shipment_db`). Không truy vấn trực tiếp cơ sở dữ liệu của microservice khác.
+- **Hàng đợi tập trung & Phân loại sự cố (Issue Categorization)**:
+  - Nhóm `UNASSIGNED`: Đơn hàng đang chờ gán tài xế do thuật toán tự động không tìm thấy tài xế đủ điều kiện (`unassignedReason`). Severity: `HIGH`. Thao tác khả dụng: `ASSIGN` (gán tài xế thủ công - PB-035).
+  - Nhóm `FAILED`: Đơn hàng giao thất bại do các lý do khách quan/chủ quan (`failureReason`, `failureNotes`), tài xế trước đó được giải phóng. Severity: `CRITICAL`. Thao tác khả dụng: `REASSIGN` (chuyển giao sang tài xế khác - PB-036 & PB-043).
+- **Bộ lọc, Tìm kiếm & Phân trang**:
+  - Hỗ trợ lọc theo `category` (`ALL`, `UNASSIGNED`, `FAILED`).
+  - Tìm kiếm toàn văn theo từ khóa `search` (tìm trên Order ID, mã đơn, địa chỉ giao hàng, tên người nhận, lý do sự cố).
+  - Phân trang chuẩn (`page`, `size`) kèm số liệu thống kê tổng quan (`totalActionable`, `unassignedCount`, `failedCount`).
+  - Sắp xếp linh hoạt: `newest_first` (ưu tiên sự cố mới phát sinh) hoặc `oldest_first` (ưu tiên đơn hàng chờ lâu nhất).
+- **Tái sử dụng quy trình & Chống xung đột trạng thái (Concurrency Protection)**:
+  - Tái sử dụng trọn vẹn logic và API của PB-035 (`POST /api/shipments/assignments/{orderId}/manual-assign`) và PB-036 / PB-043 (`POST /api/shipments/assignments/{orderId}/reassign`).
+  - Kiểm tra điều kiện xử lý của từng Order ngay tại backend: nếu đơn hàng đã được điều phối viên khác hoặc hệ thống xử lý (chuyển sang `ASSIGNED`, `IN_TRANSIT` hoặc `DELIVERED`), backend lập tức từ chối thao tác với mã lỗi tương ứng (HTTP `409 Conflict` hoặc `400 Bad Request`), ngăn chặn triệt để thao tác dựa trên dữ liệu cũ trên giao diện.
+- **Kiểm soát quyền truy cập (RBAC)**: Chỉ tài khoản có vai trò `DISPATCHER` hoặc `ADMIN` được phép truy cập (`403 Forbidden` cho `CUSTOMER` và `DRIVER`).
+
+### 2. Danh sách API Endpoints
+
+| Phương thức | Endpoint (qua Gateway) | Direct Endpoint | Quyền hạn | Mô tả |
+|---|---|---|---|---|
+| `GET` | `/api/shipments/assignments/actionable` | `/assignments/actionable` | `DISPATCHER`, `ADMIN` | Lấy danh sách Order cần xử lý (hỗ trợ lọc, search, sort, pagination) |
+| `GET` | `/api/shipments/assignments/actionable/{orderId}` | `/assignments/actionable/{orderId}` | `DISPATCHER`, `ADMIN` | Lấy chi tiết đơn hàng cần xử lý kèm danh sách thao tác khả dụng |
+| `GET` | `/api/shipments/operations/actionable-orders` | `/operations/actionable-orders` | `DISPATCHER`, `ADMIN` | Alias theo namespace Operations |
+| `POST` | `/api/shipments/assignments/{orderId}/manual-assign` | `/assignments/{orderId}/manual-assign` | `DISPATCHER`, `ADMIN` | Gán tài xế thủ công cho đơn `UNASSIGNED` (tái sử dụng PB-035) |
+| `POST` | `/api/shipments/assignments/{orderId}/reassign` | `/assignments/{orderId}/reassign` | `DISPATCHER`, `ADMIN` | Chuyển giao tài xế mới cho đơn `FAILED` (tái sử dụng PB-036 & PB-043) |
+
+### 3. Ví dụ Payload API
+
+#### Response: Danh sách Order cần xử lý (GET `/api/shipments/assignments/actionable?category=ALL&page=0&size=10`)
+```json
+{
+  "success": true,
+  "message": "Actionable orders retrieved successfully",
+  "data": {
+    "content": [
+      {
+        "orderId": "ORD-2026-F10",
+        "orderNumber": "ORD-2026-F10",
+        "status": "FAILED",
+        "issueCategory": "FAILED",
+        "issueSeverity": "CRITICAL",
+        "customerId": "cust-8812",
+        "recipientName": "Le Thi B",
+        "recipientPhone": "0912345678",
+        "deliveryAddress": "200 Hai Ba Trung, District 3, HCMC",
+        "totalAmount": 180000.00,
+        "createdAt": "2026-10-22T08:15:00Z",
+        "updatedAt": "2026-10-22T08:50:00Z",
+        "driverId": "drv-prev-99",
+        "previousDriverId": "drv-prev-99",
+        "failedAt": "2026-10-22T08:50:00Z",
+        "failureReason": "Customer phone unreachable",
+        "failureNotes": "Called 3 times over 15 minutes, recipient not answering doorbell",
+        "allowedActions": ["REASSIGN"]
+      },
+      {
+        "orderId": "ORD-2026-U05",
+        "orderNumber": "ORD-2026-U05",
+        "status": "UNASSIGNED",
+        "issueCategory": "UNASSIGNED",
+        "issueSeverity": "HIGH",
+        "customerId": "cust-3310",
+        "recipientName": "Tran Van A",
+        "recipientPhone": "0987654321",
+        "deliveryAddress": "100 Le Loi, District 1, HCMC",
+        "totalAmount": 120000.00,
+        "createdAt": "2026-10-22T08:30:00Z",
+        "updatedAt": "2026-10-22T08:30:00Z",
+        "unassignedReason": "NO_ELIGIBLE_DRIVER",
+        "unassignedAt": "2026-10-22T08:30:00Z",
+        "allowedActions": ["ASSIGN"]
+      }
+    ],
+    "page": 0,
+    "size": 10,
+    "totalElements": 2,
+    "totalPages": 1,
+    "totalActionable": 2,
+    "unassignedCount": 1,
+    "failedCount": 1
+  }
+}
+```
+
+### 4. Giao diện Vận hành (Operations Frontend)
+- Màn hình **Actionable Orders & Exceptions** trong ứng dụng `fe_dispatcher` (trang `Exceptions`):
+  - Hiển thị banner thống kê sự cố vận hành: Đếm số lượng đơn thất bại khẩn cấp và đơn chưa gán tài xế.
+  - Bộ subtabs phân loại: "All Attention", "Unassigned Orders", "Delivery Failures".
+  - Ô tìm kiếm từ khóa đa trường và bộ chọn sắp xếp thời gian chờ.
+  - Bảng danh sách hiển thị chi tiết: Mã đơn hàng, Trạng thái & Mức độ nghiêm trọng, Tuổi đơn / Thời gian chờ, Địa chỉ & Thông tin người nhận, Chi tiết nguyên nhân sự cố, Tài xế tiền nhiệm.
+  - Nút thao tác trực tiếp: "Assign Driver" cho đơn unassigned, "Reassign Driver" cho đơn delivery failure.
+  - Hộp thoại điều phối (`AssignModal`) kết nối API gán tài xế thực tế, tích hợp cơ chế phát hiện và cảnh báo xung đột (HTTP 409) khi đơn đã được điều phối viên khác xử lý trước đó.
+
+---
+
+## Task PB-050: Publish Notification Business Events (Phát hành Sự kiện Nghiệp vụ phục vụ Thông báo)
+
+### 1. Mục tiêu & Ý nghĩa Nghiệp vụ
+Khi các mốc nghiệp vụ quan trọng trong vòng đời đơn hàng và vận chuyển diễn ra (`ORDER_DELIVERED`, `ORDER_FAILED`, `DRIVER_ASSIGNED`, `DRIVER_REASSIGNED`, `ORDER_PICKED_UP`, `ORDER_IN_TRANSIT`, `ORDER_CANCELLED`), hệ thống cần thông báo tức thời và chính xác cho Khách hàng, Tài xế và Bộ phận Vận hành (Operations).
+
+Để đảm bảo tính độc lập giữa các domain service và dịch vụ gửi tin, kiến trúc hệ thống áp dụng **Event-Driven Decoupling**:
+- Các service nghiệp vụ (`shipment-service` và `order-service`) **tuyệt đối không gọi trực tiếp dịch vụ email/SMS/push**.
+- Thay vào đó, service nghiệp vụ chỉ phát hành các **Business Domain Event** chuẩn hóa lên Apache Kafka (`logistics.shipment.events`, `logistics.order.events`).
+- **Notification Platform** (`notification-service`) đăng ký lắng nghe các topic trên, xử lý loại bỏ trùng lặp (Idempotency / Inbox Pattern) và thực hiện gửi thông báo qua kênh phù hợp (Email, SMS, Push Notification).
+
+### 2. Danh mục Sự kiện Nghiệp vụ (Event Matrix)
+
+| Event Type | Producer Service | Kafka Topic | Trigger Condition | Đối tượng & Mục đích Thông báo |
+|---|---|---|---|---|
+| `ORDER_DELIVERED` | `shipment-service` | `logistics.shipment.events` | Tài xế xác nhận giao hàng thành công (PB-041) | **Khách hàng**: Thông báo đơn đã giao thành công, địa chỉ nhận, thời gian và bằng chứng giao hàng (POD). |
+| `ORDER_FAILED` | `shipment-service` | `logistics.shipment.events` | Tài xế báo giao hàng thất bại (PB-042) | **Khách hàng & Operations**: Cảnh báo giao không thành công, lý do thất bại và ghi chú để CSKH / Ops can thiệp kịp thời. |
+| `DRIVER_ASSIGNED` | `shipment-service` | `logistics.shipment.events` | Đơn hàng được phân công tài xế (PB-031/PB-032/PB-035) | **Khách hàng & Tài xế**: Báo khách hàng tài xế đã tiếp nhận; báo tài xế nhận chuyến giao mới. |
+| `DRIVER_REASSIGNED` | `shipment-service` | `logistics.shipment.events` | Điều phối viên chuyển giao tài xế mới (PB-036/PB-043) | **Khách hàng & Tài xế**: Cập nhật tài xế mới cho khách hàng; thu hồi đơn từ tài xế cũ. |
+| `ORDER_PICKED_UP` | `shipment-service` | `logistics.shipment.events` | Tài xế xác nhận đã lấy kiện hàng từ kho/shop (PB-039) | **Khách hàng**: Thông báo đơn hàng đã rời điểm lấy hàng. |
+| `ORDER_IN_TRANSIT` | `shipment-service` | `logistics.shipment.events` | Tài xế bắt đầu hành trình giao tới người nhận (PB-040) | **Khách hàng**: Thông báo đơn hàng đang trên đường giao tới điểm đến. |
+| `ORDER_CANCELLED` | `order-service` | `logistics.order.events` | Khách hàng hủy đơn hàng ở trạng thái PENDING (PB-019) | **Khách hàng**: Xác nhận hủy đơn hàng thành công và lý do hủy. |
+
+### 3. Chuẩn hóa Event Contract & Bảo vệ Dữ liệu (Privacy by Design)
+- **Chuẩn phong bì Envelope**: Sử dụng `DomainEvent<T>` chuẩn hóa thuộc `common-lib`:
+  - `eventId`: UUID duy nhất cho từng sự kiện.
+  - `eventType`: Tên sự kiện dạng SCREAMING_SNAKE_CASE (vd: `ORDER_DELIVERED`).
+  - `aggregateId`: Khóa tổng hợp nghiệp vụ (`orderId`), dùng làm **Kafka Partition Key** nhằm bảo đảm thứ tự phân phối (in-order delivery) theo từng đơn hàng.
+  - `timestamp`: Thời điểm diễn ra sự kiện trong thực tế (UTC).
+  - `payload`: Đối tượng dữ liệu nghiệp vụ đã được làm sạch.
+- **Bảo vệ Thông tin Cá nhân & Không lọt PII nhạy cảm**:
+  - Payload chỉ chứa metadata phục vụ thông báo: `orderId`, `orderNumber`, `customerId`, `recipientName`, `recipientPhone`, `deliveryAddress`, `driverId`, `status`, `deliveredAt` / `failedAt`, `failureReason`, `failureNotes`.
+  - **Tuyệt đối không đưa vào event**: Mật khẩu, JWT token xác thực, thông tin thẻ ngân hàng/thanh toán, dữ liệu nội bộ không liên quan.
+
+#### Ví dụ Event Payload: `ORDER_DELIVERED`
+```json
+{
+  "eventId": "e9a78913-db3b-4a75-afd7-0a33c60672a1",
+  "eventType": "ORDER_DELIVERED",
+  "aggregateId": "ord-20261022-001",
+  "timestamp": "2026-10-22T10:30:00Z",
+  "payload": {
+    "assignmentId": "asg-9021",
+    "orderId": "ord-20261022-001",
+    "orderNumber": "ORD-20261022-001",
+    "customerId": "cust-uuid-4412",
+    "recipientName": "Nguyen Van A",
+    "recipientPhone": "0909123456",
+    "deliveryAddress": "123 Nguyen Hue, Quan 1, TP.HCM",
+    "driverId": "drv-fast-88",
+    "status": "DELIVERED",
+    "deliveredAt": "2026-10-22T10:30:00Z",
+    "deliveryNotes": "Giao tận tay lễ tân tòa nhà",
+    "proofOfDelivery": "https://storage.logistics.com/pod/sig-9021.png",
+    "totalAmount": 250000.00
+  }
+}
+```
+
+#### Ví dụ Event Payload: `ORDER_FAILED`
+```json
+{
+  "eventId": "abe12a6e-eea8-46dd-b8c6-fb41792848fd",
+  "eventType": "ORDER_FAILED",
+  "aggregateId": "ord-20261022-002",
+  "timestamp": "2026-10-22T10:45:00Z",
+  "payload": {
+    "assignmentId": "asg-9022",
+    "orderId": "ord-20261022-002",
+    "orderNumber": "ORD-20261022-002",
+    "customerId": "cust-uuid-5521",
+    "recipientName": "Tran Thi B",
+    "recipientPhone": "0912345678",
+    "deliveryAddress": "456 Nguyen Trai, Quan 5, TP.HCM",
+    "driverId": "drv-fast-88",
+    "status": "FAILED",
+    "failedAt": "2026-10-22T10:45:00Z",
+    "failureReason": "Khách hàng không nghe máy sau 3 lần gọi",
+    "failureNotes": "Đã chờ 15 phút tại cổng nhưng không liên lạc được",
+    "totalAmount": 180000.00
+  }
+}
+```
+
+### 4. Đảm bảo Tính Toàn Vẹn Giao Dịch (Transactional Outbox Pattern)
+Để loại bỏ triệt để nguy cơ **Dual-Write Hazard** (CSDL cập nhật thành công nhưng broker ngắt kết nối gây mất event, hoặc event phát thành công nhưng CSDL rollback gây ra thông báo ảo - phantom notification):
+1. **Outbox Table (`outbox_events`)**:
+   - Được khởi tạo tự động bằng Liquibase changeset `014-create-outbox-events-table.yaml` tại `shipment-service`.
+2. **Nguyên tử hóa trong Giao dịch (Atomic Persistence)**:
+   - Khi một thao tác nghiệp vụ thành công (`confirmDelivery`, `reportDeliveryFailure`, `assignDriver`, ...), bản ghi `OutboxEvent` được lưu trữ vào bảng `outbox_events` **trong cùng Database Transaction** với trạng thái `PENDING`.
+   - **Rollback Guarantee**: Nếu transaction gặp lỗi hoặc bị hủy $\rightarrow$ bản ghi `OutboxEvent` tự động bị rollback theo CSDL, **không có bất kỳ message nào được phát tán ra Kafka**.
+3. **Phát hành Sau Commit (Post-Commit Publish)**:
+   - Đăng ký bộ lắng nghe JTA `TransactionSynchronizationRegistry.registerInterposedSynchronization`: chỉ khi `status == STATUS_COMMITTED` thì mới bắt đầu tiến trình gửi message sang Kafka.
+   - Khi Kafka ACK nhận gói tin thành công: cập nhật `status = PUBLISHED` kèm `publishedAt`.
+4. **Xử lý Sự cố Kết nối & Cơ chế Retry (Resilience)**:
+   - Nếu Kafka tạm thời mất kết nối hoặc bị nghẽn: bản ghi outbox vẫn được giữ lại với trạng thái `PENDING` và tăng biến đếm `retryCount`.
+   - `ShipmentOutboxPublisherService` chạy định kỳ (`@Scheduled(every = "5s")`) quét các event `PENDING` quá hạn hoặc worker bị timeout (`PROCESSING` stale) để tiến hành tái xuất bản cho đến khi Kafka xác nhận thành công.
+
+### 5. Thiết kế Idempotent Consumer tại Notification Service
+- `notification-service` tiêu thụ trực tiếp channel `shipment-events` (`logistics.shipment.events`) thông qua `ShipmentNotificationConsumer`.
+- **Cơ chế Triệt tiêu Trùng lặp (Inbox Pattern)**:
+  - Khi nhận message, consumer kiểm tra sự tồn tại của `eventId` trong bảng `inbox_events`.
+  - Nếu `inboxEventRepository.existsByEventId(eventId)` là `true` $\rightarrow$ xác định đây là message phát lại (Kafka replay/retry), lập tức bỏ qua và ACK an toàn, **tuyệt đối không gửi lặp email/SMS lần 2 cho khách hàng**.
+  - Nếu là sự kiện mới: tạo bản ghi `Notification` (`SENT`), gửi email qua `Quarkus Mailer`, ghi nhận `inbox_events` với trạng thái `PROCESSED` và hoàn tất commit offset (ACK).
+
+---
+
+## Task PB-051: Tích hợp Logistics với Notification Platform Hiện Có
+
+Tích hợp hệ thống Logistics (`PRJ3`) với Notification Platform độc lập (`/Users/ngkmsn/notification_platform`) thông qua API Ingestion Contract chính thức (`POST /api/v1/notifications`), đảm bảo phân tách ranh giới nghiệp vụ (Separation of Concerns), khả năng chịu lỗi (Fault-Tolerance), khử trùng lặp (Idempotency) và bảo đảm tính toàn vẹn trạng thái đơn hàng (Order Non-Rollback Guarantee).
+
+### 1. Ranh Giới Trách Nhiệm Giữa Logistics & Notification Platform
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Driver as Driver / Operations
+    participant Logistics as Shipment / Order Service
+    participant LDB as Logistics DB (Postgres)
+    participant Kafka as Apache Kafka (Topics)
+    participant NotiAdapter as Logistics Notification Service
+    participant NDB as Notification DB (inbox_events)
+    participant NotiPlatform as External Notification Platform (:8085)
+    participant Provider as Push / SMS / Email Providers
+
+    Driver->>Logistics: confirmDelivery / failDelivery / cancelOrder
+    Note over Logistics,LDB: 1. DB Transaction (@Transactional)
+    Logistics->>LDB: Commit Order / Assignment State (DELIVERED/FAILED)
+    Logistics->>LDB: Persist OutboxEvent (ORDER_DELIVERED, PENDING)
+    Note over Logistics,LDB: Transaction Committed successfully!
+    
+    Logistics->>Kafka: 2. Async Publish to logistics.shipment.events (key=orderId)
+    
+    Kafka->>NotiAdapter: 3. Consume Domain Event (ShipmentNotificationConsumer)
+    Note over NotiAdapter,NDB: 4. Idempotency Check via inbox_events
+    alt Already processed
+        NotiAdapter-->>Kafka: Skip duplicate & ACK
+    else New Event
+        NotiAdapter->>NotiAdapter: 5. Map to NotificationPlatformRequest (TemplateMapper)
+        NotiAdapter->>NotiPlatform: 6. HTTP POST /api/v1/notifications (with retry & timeout)
+        alt Platform returns 202 Accepted
+            NotiPlatform-->>NotiAdapter: 202 Accepted {id: UUID, status: QUEUED}
+            NotiAdapter->>NDB: Save Notification (SENT) & inbox_events (PROCESSED)
+        else Platform is Down / 503 / 429
+            NotiAdapter->>NDB: Save Notification (FAILED) for background retry
+            Note over NotiAdapter: Scheduled RetryService resubmits when platform recovers
+        end
+        NotiAdapter-->>Kafka: ACK Message
+    end
+    
+    Note over NotiPlatform,Provider: 7. Notification Platform manages Rate Limiting,<br/>Circuit Breaker, DLQ, and Provider delivery
+```
+
+- **Logistics System (`shipment-service`, `order-service`)**:
+  - Chịu trách nhiệm thực hiện toàn bộ nghiệp vụ Logistics (giao hàng, thất bại, hủy đơn, gán tài xế).
+  - Trạng thái Order/Assignment được cam kết vào cơ sở dữ liệu Logistics trước khi phát sinh Domain Event qua Transactional Outbox.
+  - **Tuyệt đối không rollback Order** khi việc gửi thông báo gặp sự cố, đảm bảo tính nhất quán nghiệp vụ phân tán.
+- **Logistics Notification Service (`notification-service`)**:
+  - Đóng vai trò là Integration Adapter / Bridge giữa Logistics và Notification Platform.
+  - Khử trùng lặp qua Inbox Pattern (`inbox_events`), chuẩn hóa payload sang DTO chính thức của Notification Platform qua `NotificationTemplateMapper`.
+  - Thực hiện HTTP POST với cơ chế retry (Exponential backoff, đọc header `Retry-After`), quản lý timeout và lưu vết `platform_notification_id`.
+  - Sở hữu worker nền `NotificationRetryService` tự động phục hồi các thông báo `FAILED` khi Notification Platform phục hồi.
+- **Notification Platform (`/Users/ngkmsn/notification_platform`)**:
+  - Tiếp nhận thông báo, ghi nhận Outbox riêng của nền tảng (`202 Accepted`).
+  - Quản lý Device Registry, Redis Token Bucket Rate Limiter, Redis Circuit Breaker, Kafka Priority Queues, Dead Letter Queue (DLQ) và dispatch tới nhà cung cấp (FCM, SMS, SMTP).
+
+---
+
+### 2. Contract Tích Hợp Chính Thức (Official Contract Reuse)
+
+Tái sử dụng 100% contract chính thức từ `com.notification.api.dto.CreateNotificationRequest` và `CreateNotificationResponse`:
+
+#### A. Ingestion Request Contract
+- **Endpoint**: `POST /api/v1/notifications`
+- **Headers**:
+  - `Content-Type: application/json`
+  - `Accept: application/json`
+  - `X-Correlation-Id`: `{eventId}` (UUID của sự kiện Logistics)
+  - `X-Idempotency-Key`: `{eventId}` (Ngăn chặn xử lý trùng lặp trên Notification Platform)
+  - `X-API-Key`: `{notification.platform.api-key}` (Tùy chọn)
+  - `Authorization`: `Bearer {notification.platform.auth-token}` (Tùy chọn)
+- **JSON Body Schema**:
+```json
+{
+  "recipient": "0988776655",
+  "channel": "SMS",
+  "subject": "Đơn hàng ORD-20261022-DEL01 đã được giao thành công",
+  "content": "Chào Nguyen Van Nam, đơn hàng ORD-20261022-DEL01 đã được tài xế drv-quick-01 giao thành công đến địa chỉ 123 Le Loi, Q1, HCMC. Cảm ơn quý khách!",
+  "priority": "NORMAL"
+}
+```
+
+#### B. Ingestion Response Contract
+- **Status Code**: `202 Accepted`
+```json
+{
+  "id": "b025d5b4-ebd5-4b07-9314-ae92c98045cf",
+  "status": "QUEUED"
+}
+```
+
+#### C. Quy Định Mã Lỗi & Chính Sách Xử Lý Tại Client (`DefaultNotificationPlatformClient`)
+| HTTP Status | Nguyên Nhân Tại Notification Platform | Hành Vi Tại Logistics Client |
+|---|---|---|
+| `202 Accepted` / `200 OK` | Đã tiếp nhận vào Outbox thành công | Lưu `platformNotificationId`, đánh dấu `SENT`, lưu `inbox_events = PROCESSED` |
+| `400 Bad Request` | Dữ liệu không hợp lệ (`recipient` trống, `channel` sai) | **Fail-fast (không retry)**, ghi log cảnh báo và lưu `FAILED` |
+| `401 Unauthorized` / `403 Forbidden` | Thiếu hoặc sai thông tin xác thực (`api-key`/`auth-token`) | **Fail-fast (không retry)**, ghi log chẩn đoán bảo mật |
+| `429 Too Many Requests` | Nền tảng quá tải, load shedding theo độ ưu tiên | Đọc header `Retry-After`, retry với backoff delay có giới hạn (`maxRetries = 3`) |
+| `503 Service Unavailable` | Nền tảng kích hoạt Emergency Cutoff bảo vệ tài nguyên | Đọc header `Retry-After`, retry tối đa `maxRetries`; nếu vẫn lỗi thì lưu `FAILED` |
+| Connection Timeout / Network Error | Sập kết nối, mất mạng, connection refused | Bắt `HttpTimeoutException` / `IOException`, retry và chuyển sang `FAILED` |
+
+---
+
+### 3. Ma Trận Ánh Xạ Template Nghiệp Vụ (Predefined Event Mapping)
+
+Hệ thống không chuyển nội dung tùy tiện mà áp dụng `NotificationTemplateMapper` chuẩn hóa:
+
+| Event Type | Channel | Priority | Tiêu Đề Mẫu (`subject`) | Nội Dung Mẫu (`content`) |
+|---|---|---|---|---|
+| `ORDER_DELIVERED` | `SMS` / `EMAIL` | `NORMAL` | `Đơn hàng {orderNumber} đã được giao thành công` | `Chào {recipientName}, đơn hàng {orderNumber} đã được tài xế {driverId} giao thành công đến địa chỉ {deliveryAddress}. Cảm ơn quý khách!` |
+| `ORDER_FAILED` | `SMS` / `EMAIL` | `HIGH` | `Thông báo giao hàng không thành công - Đơn hàng {orderNumber}` | `Chào {recipientName}, đơn hàng {orderNumber} chưa thể giao thành công do: {failureReason}. Bộ phận CSKH sẽ sớm liên hệ hỗ trợ quý khách.` |
+| `DRIVER_ASSIGNED` | `SMS` / `PUSH` | `NORMAL` | `Tài xế đã nhận giao đơn hàng {orderNumber}` | `Chào {recipientName}, tài xế {driverId} đã nhận giao đơn hàng {orderNumber} của quý khách.` |
+| `ORDER_PICKED_UP` | `SMS` / `EMAIL` | `NORMAL` | `Đơn hàng {orderNumber} đã được lấy` | `Chào {recipientName}, đơn hàng {orderNumber} đã được lấy bởi tài xế {driverId} và đang được xử lý.` |
+| `ORDER_IN_TRANSIT` | `SMS` / `EMAIL` | `NORMAL` | `Đơn hàng {orderNumber} đang trên đường giao` | `Chào {recipientName}, tài xế {driverId} đang trên đường giao đơn hàng {orderNumber} tới địa chỉ: {deliveryAddress}.` |
+| `DRIVER_REASSIGNED`| `SMS` / `EMAIL` | `NORMAL` | `Cập nhật tài xế cho đơn hàng {orderNumber}` | `Chào {recipientName}, đơn hàng {orderNumber} đã được chuyển giao cho tài xế mới: {newDriverId}.` |
+| `ORDER_CANCELLED` | `EMAIL` / `SMS` | `HIGH` | `Đơn hàng {orderNumber} đã được hủy` | `Chào {recipientName}, đơn hàng {orderNumber} đã được hủy thành công. Lý do: {reason}.` |
+
+---
+
+### 4. Background Resilience & Phục Hồi Lỗi (`NotificationRetryService`)
+- Tự động chạy nền `@Scheduled(every = "10s")` quét các bản ghi `notifications` có `status = 'FAILED'` và `retry_count < max_attempts (5)`.
+- Tự động gửi lại tới Notification Platform khi hệ thống phục hồi.
+- Khi gửi thành công: cập nhật `status = 'SENT'`, lưu `platform_notification_id` và xóa `error_message`.
+- Nếu vượt quá số lần thử tối đa: cập nhật `status = 'PERMANENTLY_FAILED'` và cảnh báo qua log vận hành.
+
+---
+
+### 5. Cấu Hình & Biến Môi Trường (Environment Variables)
+
+Toàn bộ thông số tích hợp được cấu hình linh hoạt qua biến môi trường, tuyệt đối không hardcode:
+
+```properties
+# Notification Platform Integration
+notification.platform.url=${NOTIFICATION_PLATFORM_URL:http://localhost:8085}
+notification.platform.endpoint=${NOTIFICATION_PLATFORM_ENDPOINT:/api/v1/notifications}
+notification.platform.api-key=${NOTIFICATION_PLATFORM_API_KEY:}
+notification.platform.auth-token=${NOTIFICATION_PLATFORM_AUTH_TOKEN:}
+notification.platform.connect-timeout-seconds=${NOTIFICATION_PLATFORM_CONNECT_TIMEOUT_SECONDS:3}
+notification.platform.request-timeout-seconds=${NOTIFICATION_PLATFORM_REQUEST_TIMEOUT_SECONDS:5}
+notification.platform.max-retries=${NOTIFICATION_PLATFORM_MAX_RETRIES:3}
+notification.platform.retry-delay-ms=${NOTIFICATION_PLATFORM_RETRY_DELAY_MS:500}
+
+# Notification Retry Worker
+notification.retry.enabled=${NOTIFICATION_RETRY_ENABLED:true}
+notification.retry.interval=${NOTIFICATION_RETRY_INTERVAL:10s}
+notification.retry.max-attempts=${NOTIFICATION_RETRY_MAX_ATTEMPTS:5}
+notification.retry.batch-size=${NOTIFICATION_RETRY_BATCH_SIZE:20}
+```
+
 ---
 
 ## Roadmap
@@ -2877,6 +3236,9 @@ Hệ thống cung cấp giao diện và API tổng hợp dành riêng cho vai tr
 | **PB-046** | Operations Tracking: Operations theo dõi Driver, kiểm tra vị trí thời gian thực, trạng thái, active order & RBAC | ✅ Completed |
 | **PB-047** | Map & Routing: Tích hợp Map Service, tính toán direction, lộ trình, geocoding & fallback resilience | ✅ Completed |
 | **PB-048** | Operations Dashboard: API tổng hợp chỉ số vận hành, đơn hàng, tài xế, telemetry, attention items & caching | ✅ Completed |
+| **PB-049** | Operations Actionable Orders: Tập trung Order chưa assign & Order FAILED, bộ lọc, tìm kiếm, phân trang & reassign | ✅ Completed |
+| **PB-050** | Notification Business Events: Publish notification events (DELIVERED, FAILED, ASSIGNED) via Transactional Outbox & Idempotent Consumer | ✅ Completed |
+| **PB-051** | Notification Platform Integration: Tích hợp Logistics với Notification Platform qua REST API Ingestion contract & Retry Worker | ✅ Completed |
 
 
 

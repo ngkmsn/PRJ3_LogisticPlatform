@@ -1,8 +1,11 @@
 package com.logistics.shipment.repository;
 
+import com.logistics.common.dto.ActionableOrderDto;
+import com.logistics.common.dto.ActionableOrdersPageDto;
 import com.logistics.shipment.entity.Assignment;
 import com.logistics.shipment.model.AssignmentStatus;
 import io.quarkus.hibernate.orm.panache.PanacheRepositoryBase;
+import io.quarkus.panache.common.Parameters;
 import jakarta.enterprise.context.ApplicationScoped;
 
 import java.util.Optional;
@@ -150,6 +153,103 @@ public class AssignmentRepository implements PanacheRepositoryBase<Assignment, S
                 dId, uId,
                 AssignmentStatus.ASSIGNED, AssignmentStatus.PICKED_UP, AssignmentStatus.IN_TRANSIT)
                 .firstResultOptional();
+    }
+
+    public ActionableOrdersPageDto findActionableOrders(String category, String status, String search, int page, int size, String sort) {
+        int pageIndex = Math.max(0, page);
+        int pageSize = size > 0 ? size : 10;
+
+        StringBuilder queryStr = new StringBuilder();
+        Parameters params = new Parameters();
+
+        // 1. Filter by status / category
+        AssignmentStatus targetStatus = null;
+        if (status != null && !status.trim().isEmpty() && !"ALL".equalsIgnoreCase(status.trim())) {
+            try {
+                targetStatus = AssignmentStatus.valueOf(status.trim().toUpperCase());
+            } catch (IllegalArgumentException ignored) {}
+        } else if (category != null && !category.trim().isEmpty() && !"ALL".equalsIgnoreCase(category.trim())) {
+            try {
+                targetStatus = AssignmentStatus.valueOf(category.trim().toUpperCase());
+            } catch (IllegalArgumentException ignored) {}
+        }
+
+        if (targetStatus == AssignmentStatus.UNASSIGNED) {
+            queryStr.append("status = :status");
+            params.and("status", AssignmentStatus.UNASSIGNED);
+        } else if (targetStatus == AssignmentStatus.FAILED) {
+            queryStr.append("status = :status");
+            params.and("status", AssignmentStatus.FAILED);
+        } else {
+            queryStr.append("status in (:st1, :st2)");
+            params.and("st1", AssignmentStatus.UNASSIGNED).and("st2", AssignmentStatus.FAILED);
+        }
+
+        // 2. Search filter
+        if (search != null && !search.trim().isEmpty()) {
+            String searchPattern = "%" + search.trim().toLowerCase() + "%";
+            queryStr.append(" and (lower(orderId) like :search or lower(orderNumber) like :search or lower(deliveryAddress) like :search or lower(recipientName) like :search or lower(failureReason) like :search or lower(unassignedReason) like :search or lower(driverId) like :search)");
+            params.and("search", searchPattern);
+        }
+
+        // 3. Sorting
+        if ("oldest_first".equalsIgnoreCase(sort) || "asc".equalsIgnoreCase(sort)) {
+            queryStr.append(" order by coalesce(unassignedAt, failedAt, createdAt) asc, createdAt asc");
+        } else {
+            queryStr.append(" order by coalesce(failedAt, unassignedAt, updatedAt, createdAt) desc, createdAt desc");
+        }
+
+        io.quarkus.panache.common.Page panachePage = io.quarkus.panache.common.Page.of(pageIndex, pageSize);
+        var panacheQuery = find(queryStr.toString(), params).page(panachePage);
+        long totalElements = panacheQuery.count();
+        java.util.List<Assignment> assignments = panacheQuery.list();
+
+        java.util.List<ActionableOrderDto> dtos = assignments.stream()
+                .map(AssignmentRepository::toActionableDto)
+                .toList();
+
+        // 4. Global counters for Operations UI badges
+        long unassignedCount = count("status = ?1", AssignmentStatus.UNASSIGNED);
+        long failedCount = count("status = ?1", AssignmentStatus.FAILED);
+        long totalActionable = unassignedCount + failedCount;
+
+        return ActionableOrdersPageDto.of(dtos, pageIndex, pageSize, totalElements,
+                totalActionable, unassignedCount, failedCount);
+    }
+
+    public Optional<Assignment> findActionableByOrderId(String orderId) {
+        if (orderId == null || orderId.trim().isEmpty()) {
+            return Optional.empty();
+        }
+        return find("orderId = ?1 and status in (?2, ?3)",
+                orderId.trim(), AssignmentStatus.UNASSIGNED, AssignmentStatus.FAILED)
+                .firstResultOptional();
+    }
+
+    public static ActionableOrderDto toActionableDto(Assignment a) {
+        if (a == null) return null;
+        ActionableOrderDto dto = new ActionableOrderDto();
+        dto.setOrderId(a.getOrderId());
+        dto.setOrderNumber(a.getOrderNumber());
+        dto.setStatus(a.getStatus() != null ? a.getStatus().name() : null);
+        dto.setCustomerId(a.getCustomerId());
+        dto.setRecipientName(a.getRecipientName());
+        dto.setRecipientPhone(a.getRecipientPhone());
+        dto.setDeliveryAddress(a.getDeliveryAddress());
+        dto.setTotalAmount(a.getTotalAmount());
+        dto.setCreatedAt(a.getCreatedAt());
+        dto.setUpdatedAt(a.getUpdatedAt());
+        dto.setDriverId(a.getDriverId());
+        dto.setPreviousDriverId(a.getPreviousDriverId());
+        dto.setAssignedAt(a.getAssignedAt());
+        dto.setAssignmentSource(a.getAssignmentSource());
+        dto.setAssignedBy(a.getAssignedBy());
+        dto.setUnassignedReason(a.getUnassignedReason());
+        dto.setUnassignedAt(a.getUnassignedAt());
+        dto.setFailedAt(a.getFailedAt());
+        dto.setFailureReason(a.getFailureReason());
+        dto.setFailureNotes(a.getFailureNotes());
+        return dto;
     }
 }
 

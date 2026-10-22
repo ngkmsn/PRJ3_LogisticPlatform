@@ -238,6 +238,41 @@ public interface AssignmentService {
     com.logistics.shipment.dto.FailedOrderDto getFailedOrderDetail(
             String authHeader,
             String orderId);
+
+    /**
+     * Retrieves paginated actionable orders requiring Operations intervention (PB-049).
+     * Consolidates UNASSIGNED and FAILED orders, supporting category filter, search, sort, and pagination.
+     * Validates that the caller has Operations role (ADMIN or DISPATCHER).
+     *
+     * @param authHeader Bearer token
+     * @param category   issue category ("ALL", "UNASSIGNED", "FAILED")
+     * @param status     order status filter ("ALL", "UNASSIGNED", "FAILED")
+     * @param search     keyword search across orderId, orderNumber, deliveryAddress, recipient, failure reason
+     * @param page       0-based page number
+     * @param size       page size
+     * @param sort       sorting direction ("newest_first", "oldest_first")
+     * @return ActionableOrdersPageDto containing matching actionable orders and summary counters
+     */
+    com.logistics.common.dto.ActionableOrdersPageDto getActionableOrders(
+            String authHeader,
+            String category,
+            String status,
+            String search,
+            int page,
+            int size,
+            String sort);
+
+    /**
+     * Retrieves detailed information of a specific actionable order (UNASSIGNED or FAILED) for Operations triage (PB-049).
+     * Validates that the caller has Operations role (ADMIN or DISPATCHER).
+     *
+     * @param authHeader Bearer token
+     * @param orderId    order identifier
+     * @return ActionableOrderDto
+     */
+    com.logistics.common.dto.ActionableOrderDto getActionableOrderDetail(
+            String authHeader,
+            String orderId);
 }
 
 

@@ -25,6 +25,8 @@ databaseChangeLog:
       file: db/changelog/changes/012-add-failure-fields-to-assignments.yaml
   - include:
       file: db/changelog/changes/013-create-driver-locations-table.yaml
+  - include:
+      file: db/changelog/changes/014-create-outbox-events-table.yaml
 
 
 

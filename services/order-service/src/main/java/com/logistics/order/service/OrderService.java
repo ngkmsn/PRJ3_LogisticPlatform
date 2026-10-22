@@ -34,6 +34,7 @@ import java.util.List;
 import java.util.UUID;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.logistics.order.dto.OrderCancelledEventPayload;
 import com.logistics.order.dto.OrderCreatedEventPayload;
 import com.logistics.order.entity.OutboxEvent;
 import com.logistics.order.repository.OutboxEventRepository;
@@ -321,6 +322,7 @@ public class OrderService {
 
         orderRepository.persist(order);
         recordStatusHistory(order, OrderStatus.PENDING, OrderStatus.CANCELLED, customer.getUserId(), "CUSTOMER", cancelReason);
+        recordOrderCancelledOutboxEvent(order, cancelReason);
 
         log.info("Order cancelled successfully: orderId='{}', orderNumber='{}', customerId='{}'",
                 order.getId(), order.getOrderNumber(), customer.getUserId());
@@ -471,6 +473,35 @@ public class OrderService {
                 throw re;
             }
             throw new IllegalStateException("Failed to record ORDER_CREATED outbox event: " + e.getMessage(), e);
+        }
+    }
+
+    private void recordOrderCancelledOutboxEvent(Order order, String cancelReason) {
+        if (outboxEventRepository == null) {
+            return;
+        }
+        try {
+            OrderCancelledEventPayload payloadObj = OrderCancelledEventPayload.from(order, cancelReason);
+            String payloadJson = objectMapper != null
+                    ? objectMapper.writeValueAsString(payloadObj)
+                    : "{}";
+
+            OutboxEvent outboxEvent = new OutboxEvent(
+                    "ORDER",
+                    order.getId(),
+                    "ORDER_CANCELLED",
+                    payloadJson
+            );
+
+            outboxEventRepository.persist(outboxEvent);
+            log.info("Recorded ORDER_CANCELLED outbox event: eventId='{}', orderId='{}', eventType='{}'",
+                    outboxEvent.getId(), order.getId(), outboxEvent.getEventType());
+        } catch (Exception e) {
+            log.error("Failed to record ORDER_CANCELLED outbox event for orderId='{}'", order.getId(), e);
+            if (e instanceof RuntimeException re) {
+                throw re;
+            }
+            throw new IllegalStateException("Failed to record ORDER_CANCELLED outbox event: " + e.getMessage(), e);
         }
     }
 

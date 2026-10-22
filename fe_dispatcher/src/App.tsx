@@ -1805,103 +1805,493 @@ function DriversPage({ openOrder }: { openOrder?: (id: string) => void }) {
   )
 }
 
-function ExceptionsPage({ openOrder }: { openOrder: (id: string) => void }) {
+interface ActionableOrderItem {
+  orderId: string
+  orderNumber?: string
+  status: string
+  issueCategory: string
+  issueSeverity: string
+  customerId?: string
+  recipientName?: string
+  recipientPhone?: string
+  deliveryAddress?: string
+  totalAmount?: number
+  createdAt: string
+  updatedAt?: string
+  driverId?: string
+  previousDriverId?: string
+  assignedAt?: string
+  assignmentSource?: string
+  assignedBy?: string
+  unassignedReason?: string
+  unassignedAt?: string
+  failedAt?: string
+  failureReason?: string
+  failureNotes?: string
+  allowedActions?: string[]
+}
+
+interface ActionableOrdersData {
+  content: ActionableOrderItem[]
+  page: number
+  size: number
+  totalElements: number
+  totalPages: number
+  totalActionable: number
+  unassignedCount: number
+  failedCount: number
+}
+
+function ExceptionsPage({
+  openOrder,
+  onAssignOrder,
+  refreshTrigger,
+}: {
+  openOrder: (id: string) => void
+  onAssignOrder?: (id: string, isFailed: boolean) => void
+  refreshTrigger?: number
+}) {
+  const [data, setData] = useState<ActionableOrdersData | null>(null)
+  const [loading, setLoading] = useState<boolean>(true)
+  const [refreshing, setRefreshing] = useState<boolean>(false)
+  const [error, setError] = useState<string | null>(null)
+  const [isAccessDenied, setIsAccessDenied] = useState<boolean>(false)
+  const [category, setCategory] = useState<"ALL" | "UNASSIGNED" | "FAILED">("ALL")
+  const [search, setSearch] = useState<string>("")
+  const [sort, setSort] = useState<"newest_first" | "oldest_first">("newest_first")
+  const [page, setPage] = useState<number>(0)
+  const size = 10
+
+  const fetchActionableOrders = useCallback(async (isRefresh = false) => {
+    if (isRefresh) setRefreshing(true)
+    else setLoading(true)
+    setError(null)
+    setIsAccessDenied(false)
+
+    try {
+      const token = localStorage.getItem("token") || "Bearer sample.dispatcher.jwt"
+      const params = new URLSearchParams({
+        category,
+        page: String(page),
+        size: String(size),
+        sort,
+      })
+      if (search.trim()) {
+        params.append("search", search.trim())
+      }
+
+      const res = await fetch(`/api/shipments/assignments/actionable?${params.toString()}`, {
+        headers: {
+          Accept: "application/json",
+          Authorization: token.startsWith("Bearer ") ? token : `Bearer ${token}`,
+        },
+      })
+
+      if (res.status === 401 || res.status === 403) {
+        setIsAccessDenied(true)
+        setData(null)
+        return
+      }
+
+      const body = await res.json()
+      if (body.success && body.data) {
+        setData(body.data)
+      } else {
+        setError(body.message || "Failed to load actionable orders")
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err)
+      setError(msg || "Network error loading actionable orders")
+    } finally {
+      setLoading(false)
+      setRefreshing(false)
+    }
+  }, [category, page, size, sort, search])
+
+  useEffect(() => {
+    fetchActionableOrders(false)
+  }, [fetchActionableOrders, refreshTrigger])
+
+  const formatTimeAgo = (iso?: string) => {
+    if (!iso) return "—"
+    try {
+      const diffMs = Date.now() - new Date(iso).getTime()
+      const diffMins = Math.floor(diffMs / 60000)
+      if (diffMins < 1) return "Just now"
+      if (diffMins < 60) return `${diffMins}m ago`
+      const diffHours = Math.floor(diffMins / 60)
+      if (diffHours < 24) return `${diffHours}h ${diffMins % 60}m ago`
+      return `${Math.floor(diffHours / 24)}d ago`
+    } catch {
+      return iso
+    }
+  }
+
+  const items = data?.content || []
+  const totalActionable = data?.totalActionable ?? 0
+  const unassignedCount = data?.unassignedCount ?? 0
+  const failedCount = data?.failedCount ?? 0
+  const totalElements = data?.totalElements ?? 0
+  const totalPages = data?.totalPages ?? 1
+
   return (
     <div className="page">
       <div className="page-title">
         <div>
-          <h1>Exceptions & alerts</h1>
+          <h1>Actionable Orders & Exceptions (PB-049)</h1>
           <p>
-            Investigate and resolve operational issues requiring human attention
+            Centralized queue of UNASSIGNED orders and delivery FAILURES requiring Operations intervention
           </p>
         </div>
-        <Button icon="refresh">Refresh</Button>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <Button icon="refresh" onClick={() => fetchActionableOrders(true)}>
+            {refreshing ? "Refreshing..." : "Refresh Queue"}
+          </Button>
+        </div>
       </div>
-      <div className="exception-banner">
-        <div>
-          <Icon name="alert" />
+
+      {isAccessDenied && (
+        <div
+          className="exception-banner"
+          style={{ borderColor: "#ef4444", background: "rgba(239, 68, 68, 0.08)" }}
+        >
           <div>
-            <strong>5 critical exceptions require immediate attention</strong>
-            <span>Oldest exception has been open for 24 minutes</span>
+            <Icon name="alert" />
+            <div>
+              <strong style={{ color: "#b91c1c" }}>403 Access Denied: Operations Only</strong>
+              <span>
+                You do not have permission to view actionable operational orders. Only accounts with DISPATCHER or ADMIN role are authorized.
+              </span>
+            </div>
           </div>
         </div>
-        <Button variant="danger">Review critical</Button>
-      </div>
-      <div className="subtabs">
-        <button className="active">
-          Open <span>27</span>
-        </button>
-        <button>
-          Assigned to me <span>4</span>
-        </button>
-        <button>
-          Monitoring <span>8</span>
-        </button>
-        <button>
-          Resolved today <span>43</span>
-        </button>
-      </div>
-      <section className="panel table-panel">
-        <FilterBar search="Search exception or order ID" />
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Exception ID</th>
-                <th>Related order</th>
-                <th>Type</th>
-                <th>Severity</th>
-                <th>Created</th>
-                <th>Age</th>
-                <th>Current state</th>
-                <th>Assigned operator</th>
-                <th>Action</th>
-              </tr>
-            </thead>
-            <tbody>
-              {exceptions.map((x) => (
-                <tr key={x.id}>
-                  <td>
-                    <strong>{x.id}</strong>
-                  </td>
-                  <td>
-                    <span className="link" onClick={() => openOrder(x.order)}>
-                      {x.order}
-                    </span>
-                  </td>
-                  <td>{x.type}</td>
-                  <td>
-                    <Badge>{x.severity}</Badge>
-                  </td>
-                  <td>
-                    {x.created}
-                    <small>Today</small>
-                  </td>
-                  <td
-                    className={x.severity === "Critical" ? "danger-text" : ""}
-                  >
-                    {x.age}
-                  </td>
-                  <td>
-                    <Badge>{x.state}</Badge>
-                  </td>
-                  <td>{x.operator}</td>
-                  <td>
-                    <Button
-                      variant={
-                        x.severity === "Critical" ? "primary" : "secondary"
-                      }
-                    >
-                      Investigate
-                    </Button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+      )}
+
+      {error && !isAccessDenied && (
+        <div className="exception-banner" style={{ borderColor: "#f87171" }}>
+          <div>
+            <Icon name="alert" />
+            <div>
+              <strong style={{ color: "#dc2626" }}>Error Loading Actionable Orders</strong>
+              <span>{error}</span>
+            </div>
+          </div>
+          <Button variant="primary" onClick={() => fetchActionableOrders(false)}>
+            Retry
+          </Button>
         </div>
-        <Pagination label="Showing 1–6 of 27" />
-      </section>
+      )}
+
+      {!isAccessDenied && (
+        <>
+          <div
+            className="exception-banner"
+            style={
+              failedCount > 0
+                ? { borderColor: "#ef4444", background: "#fef2f2" }
+                : unassignedCount > 0
+                ? { borderColor: "#f59e0b", background: "#fffbeb" }
+                : { borderColor: "#10b981", background: "#f0fdf4" }
+            }
+          >
+            <div>
+              <Icon name="alert" />
+              <div>
+                {failedCount > 0 ? (
+                  <>
+                    <strong style={{ color: "#dc2626" }}>
+                      {failedCount} critical delivery failures require immediate reassignment
+                    </strong>
+                    <span>
+                      {unassignedCount} orders waiting for driver assignment · Total {totalActionable} issues in queue
+                    </span>
+                  </>
+                ) : unassignedCount > 0 ? (
+                  <>
+                    <strong style={{ color: "#d97706" }}>
+                      {unassignedCount} orders currently unassigned awaiting driver dispatch
+                    </strong>
+                    <span>No delivery failures pending · Review eligible drivers to assign</span>
+                  </>
+                ) : (
+                  <>
+                    <strong style={{ color: "#059669" }}>
+                      All operational queues clear — no pending exceptions
+                    </strong>
+                    <span>All orders have active drivers or reached delivered status</span>
+                  </>
+                )}
+              </div>
+            </div>
+            {failedCount > 0 && (
+              <Button
+                variant="danger"
+                onClick={() => {
+                  setCategory("FAILED")
+                  setPage(0)
+                }}
+              >
+                Review Failed Only
+              </Button>
+            )}
+          </div>
+
+          <div className="subtabs">
+            <button
+              className={category === "ALL" ? "active" : ""}
+              onClick={() => {
+                setCategory("ALL")
+                setPage(0)
+              }}
+            >
+              All Attention <span>{totalActionable}</span>
+            </button>
+            <button
+              className={category === "UNASSIGNED" ? "active" : ""}
+              onClick={() => {
+                setCategory("UNASSIGNED")
+                setPage(0)
+              }}
+            >
+              Unassigned Orders <span>{unassignedCount}</span>
+            </button>
+            <button
+              className={category === "FAILED" ? "active" : ""}
+              onClick={() => {
+                setCategory("FAILED")
+                setPage(0)
+              }}
+            >
+              Delivery Failures <span>{failedCount}</span>
+            </button>
+          </div>
+
+          <section className="panel table-panel">
+            <div style={{ display: "flex", gap: 12, padding: "12px 16px", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" }}>
+              <div style={{ display: "flex", gap: 10, flex: 1, minWidth: 260 }}>
+                <label className="table-search" style={{ flex: 1 }}>
+                  <Icon name="search" size={16} />
+                  <input
+                    placeholder="Search by Order ID, Address, Recipient, Reason..."
+                    value={search}
+                    onChange={(e) => {
+                      setSearch(e.target.value)
+                      setPage(0)
+                    }}
+                  />
+                </label>
+              </div>
+
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <span style={{ fontSize: 12, color: "#6b7280" }}>Sort:</span>
+                <select
+                  value={sort}
+                  onChange={(e) => {
+                    setSort(e.target.value as "newest_first" | "oldest_first")
+                    setPage(0)
+                  }}
+                  style={{
+                    padding: "6px 10px",
+                    borderRadius: 6,
+                    border: "1px solid #d1d5db",
+                    fontSize: 12,
+                    background: "#fff",
+                  }}
+                >
+                  <option value="newest_first">Newest First</option>
+                  <option value="oldest_first">Oldest / Waiting Longest First</option>
+                </select>
+              </div>
+            </div>
+
+            {loading ? (
+              <div style={{ padding: "48px 16px", textAlign: "center", color: "#6b7280" }}>
+                <div style={{ display: "inline-block", animation: "spin 1s linear infinite", marginBottom: 8 }}>
+                  <Icon name="refresh" size={24} />
+                </div>
+                <p>Loading actionable orders...</p>
+              </div>
+            ) : items.length === 0 ? (
+              <div style={{ padding: "48px 16px", textAlign: "center", color: "#6b7280" }}>
+                <Icon name="check" size={32} />
+                <h3 style={{ marginTop: 8, color: "#374151" }}>No Actionable Orders Found</h3>
+                <p style={{ fontSize: 13, color: "#6b7280", marginTop: 4 }}>
+                  {search
+                    ? `No orders matching "${search}". Try adjusting your search keyword.`
+                    : category !== "ALL"
+                    ? `No orders currently in ${category} category requiring attention.`
+                    : "All orders are operating smoothly without pending exceptions."}
+                </p>
+              </div>
+            ) : (
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Order ID</th>
+                      <th>Category</th>
+                      <th>Severity</th>
+                      <th>Age / Waiting</th>
+                      <th>Customer & Destination</th>
+                      <th>Failure / Issue Reason</th>
+                      <th>Previous Driver</th>
+                      <th style={{ textAlign: "right" }}>Action</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {items.map((x) => {
+                      const isFail = x.status === "FAILED"
+                      return (
+                        <tr key={x.orderId} className={isFail ? "overdue" : ""}>
+                          <td>
+                            <strong
+                              className="link"
+                              onClick={() => openOrder(x.orderId)}
+                              style={{ cursor: "pointer", color: "#2563eb" }}
+                            >
+                              {x.orderNumber || x.orderId}
+                            </strong>
+                            <div style={{ fontSize: 10, color: "#9ca3af" }}>
+                              {x.orderId}
+                            </div>
+                          </td>
+                          <td>
+                            <Badge tone={isFail ? "urgent" : "warning"}>
+                              {x.status}
+                            </Badge>
+                          </td>
+                          <td>
+                            <span
+                              style={{
+                                display: "inline-block",
+                                padding: "2px 6px",
+                                borderRadius: 4,
+                                fontSize: 10,
+                                fontWeight: 700,
+                                background: isFail ? "#fee2e2" : "#fef3c7",
+                                color: isFail ? "#dc2626" : "#d97706",
+                              }}
+                            >
+                              {x.issueSeverity || (isFail ? "CRITICAL" : "HIGH")}
+                            </span>
+                          </td>
+                          <td>
+                            <div>{formatTimeAgo(isFail ? x.failedAt : x.unassignedAt || x.createdAt)}</div>
+                            <small style={{ color: "#9ca3af", fontSize: 10 }}>
+                              Created {formatTimeAgo(x.createdAt)}
+                            </small>
+                          </td>
+                          <td>
+                            <strong style={{ fontSize: 12 }}>{x.recipientName || x.customerId}</strong>
+                            <div style={{ fontSize: 11, color: "#6b7280", maxWidth: 220, textOverflow: "ellipsis", overflow: "hidden", whiteSpace: "nowrap" }}>
+                              {x.deliveryAddress}
+                            </div>
+                          </td>
+                          <td>
+                            {isFail ? (
+                              <div style={{ color: "#dc2626" }}>
+                                <strong>{x.failureReason || "Delivery failure"}</strong>
+                                {x.failureNotes && (
+                                  <div style={{ fontSize: 11, color: "#7f1d1d" }}>{x.failureNotes}</div>
+                                )}
+                              </div>
+                            ) : (
+                              <div style={{ color: "#d97706" }}>
+                                <span>{x.unassignedReason || "Awaiting driver assignment"}</span>
+                              </div>
+                            )}
+                          </td>
+                          <td>
+                            <span style={{ fontSize: 12 }}>
+                              {x.previousDriverId || x.driverId || "—"}
+                            </span>
+                          </td>
+                          <td style={{ textAlign: "right" }}>
+                            <div style={{ display: "inline-flex", gap: 6, justifyContent: "flex-end" }}>
+                              {isFail ? (
+                                <Button
+                                  variant="danger"
+                                  icon="route"
+                                  onClick={() =>
+                                    onAssignOrder
+                                      ? onAssignOrder(x.orderId, true)
+                                      : openOrder(x.orderId)
+                                  }
+                                >
+                                  Reassign
+                                </Button>
+                              ) : (
+                                <Button
+                                  variant="primary"
+                                  icon="route"
+                                  onClick={() =>
+                                    onAssignOrder
+                                      ? onAssignOrder(x.orderId, false)
+                                      : openOrder(x.orderId)
+                                  }
+                                >
+                                  Assign
+                                </Button>
+                              )}
+                              <button
+                                className="icon-btn"
+                                title="View Order Details"
+                                onClick={() => openOrder(x.orderId)}
+                                style={{ padding: "4px 8px", cursor: "pointer", border: "1px solid #d1d5db", borderRadius: 4, background: "#f9fafb" }}
+                              >
+                                👁
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {!loading && totalElements > 0 && (
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  padding: "12px 16px",
+                  borderTop: "1px solid #e5e7eb",
+                  fontSize: 12,
+                  color: "#6b7280",
+                }}
+              >
+                <span>
+                  Showing {page * size + 1}–{Math.min((page + 1) * size, totalElements)} of {totalElements} orders requiring attention
+                </span>
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <button
+                    className="btn btn-secondary"
+                    disabled={page === 0}
+                    onClick={() => setPage((p) => Math.max(0, p - 1))}
+                    style={{ opacity: page === 0 ? 0.5 : 1, padding: "4px 10px", fontSize: 12 }}
+                  >
+                    Previous
+                  </button>
+                  <span>
+                    Page {page + 1} of {totalPages}
+                  </span>
+                  <button
+                    className="btn btn-secondary"
+                    disabled={page >= totalPages - 1}
+                    onClick={() => setPage((p) => p + 1)}
+                    style={{ opacity: page >= totalPages - 1 ? 0.5 : 1, padding: "4px 10px", fontSize: 12 }}
+                  >
+                    Next
+                  </button>
+                </div>
+              </div>
+            )}
+          </section>
+        </>
+      )}
     </div>
   )
 }
@@ -2368,27 +2758,115 @@ function OrderDetail({
   )
 }
 
-function AssignModal({ close, orderId }: { close: () => void; orderId?: string | null }) {
+function AssignModal({
+  close,
+  orderId,
+  isFailed = false,
+  onSuccess,
+}: {
+  close: () => void
+  orderId?: string | null
+  isFailed?: boolean
+  onSuccess?: () => void
+}) {
   const [selected, setSelected] = useState("DRV-0881")
-  const isFailed = orderId ? (orderId.endsWith("8842") || orderId.endsWith("8818")) : false
+  const [submitting, setSubmitting] = useState(false)
+  const [errorMsg, setErrorMsg] = useState<string | null>(null)
+  const [successMsg, setSuccessMsg] = useState<string | null>(null)
+
+  const handleAssign = async () => {
+    if (!orderId) {
+      close()
+      return
+    }
+    setSubmitting(true)
+    setErrorMsg(null)
+    setSuccessMsg(null)
+
+    try {
+      const token = localStorage.getItem("token") || "Bearer sample.dispatcher.jwt"
+      const url = isFailed
+        ? `/api/shipments/assignments/${orderId}/reassign`
+        : `/api/shipments/assignments/${orderId}/manual-assign`
+
+      const payload = isFailed
+        ? { newDriverId: selected, reason: "Operations reassign from actionable dashboard" }
+        : { driverId: selected, notes: "Operations manual assign from actionable dashboard" }
+
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+          Authorization: token.startsWith("Bearer ") ? token : `Bearer ${token}`,
+        },
+        body: JSON.stringify(payload),
+      })
+
+      const data = await res.json()
+
+      if (res.status === 409) {
+        setErrorMsg("Order was already assigned by another operator. Please refresh your list.")
+        return
+      }
+
+      if (!res.ok || !data.success) {
+        setErrorMsg(data.message || "Failed to process driver assignment. State may have changed.")
+        return
+      }
+
+      setSuccessMsg(`Driver ${selected} successfully ${isFailed ? "reassigned" : "assigned"}!`)
+      if (onSuccess) onSuccess()
+      setTimeout(() => {
+        close()
+      }, 700)
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err)
+      setErrorMsg(msg || "Network error while assigning driver.")
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
   return (
     <div className="modal-backdrop">
       <div className="modal">
         <div className="modal-head">
           <div>
             <h2>{isFailed ? "Reassign driver for failed order" : "Assign driver manually"}</h2>
-            <p>Order {orderId || "SXP-240519-8818"} · Hub to Destination</p>
+            <p>Order {orderId || "SXP-240519-8818"} · Dispatch queue</p>
           </div>
           <button className="icon-button" onClick={close}>
             <Icon name="close" />
           </button>
         </div>
+
+        {errorMsg && (
+          <div
+            className="modal-notice"
+            style={{ background: "#fef2f2", borderColor: "#ef4444", color: "#b91c1c" }}
+          >
+            <Icon name="alert" size={17} />
+            <span>{errorMsg}</span>
+          </div>
+        )}
+
+        {successMsg && (
+          <div
+            className="modal-notice"
+            style={{ background: "#f0fdf4", borderColor: "#10b981", color: "#047857" }}
+          >
+            <Icon name="check" size={17} />
+            <span>{successMsg}</span>
+          </div>
+        )}
+
         <div className="modal-notice">
           <Icon name="alert" size={17} />
           <span>
             {isFailed
-              ? "Reassigning this failed order will release the previous driver, reset delivery state, and assign the newly selected driver to resume delivery."
-              : "Manual assignment overrides the automatic assignment workflow. The selected driver will receive an immediate request."}
+              ? "Reassigning this failed order will release previous driver, reset delivery state, and assign the selected eligible driver."
+              : "Manual assignment overrides the automatic assignment workflow. The selected driver will receive an immediate assignment notification."}
           </span>
         </div>
         <div className="modal-tools">
@@ -2481,8 +2959,15 @@ function AssignModal({ close, orderId }: { close: () => void; orderId?: string |
           <span>2 of 4 drivers are eligible for assignment</span>
           <div>
             <Button onClick={close}>Cancel</Button>
-            <Button variant="primary" onClick={close}>
-              Assign selected driver
+            <Button
+              variant={isFailed ? "danger" : "primary"}
+              onClick={handleAssign}
+            >
+              {submitting
+                ? "Processing..."
+                : isFailed
+                ? "Reassign selected driver"
+                : "Assign selected driver"}
             </Button>
           </div>
         </div>
@@ -2772,14 +3257,25 @@ export default function App() {
   const [order, setOrder] = useState<string | null>(null)
   const [modal, setModal] = useState(false)
   const [trackModal, setTrackModal] = useState(false)
+  const [assignOrderId, setAssignOrderId] = useState<string | null>(null)
+  const [assignIsFailed, setAssignIsFailed] = useState<boolean>(false)
+  const [refreshTrigger, setRefreshTrigger] = useState(0)
+
   const openOrder = (id: string) => setOrder(id)
+
+  const handleOpenAssign = (id: string, isFailed: boolean) => {
+    setAssignOrderId(id)
+    setAssignIsFailed(isFailed)
+    setModal(true)
+  }
+
   let content: ReactNode
   if (order)
     content = (
       <OrderDetail
         id={order}
         back={() => setOrder(null)}
-        assign={() => setModal(true)}
+        assign={() => handleOpenAssign(order, order.endsWith("8842") || order.endsWith("8818"))}
         track={() => setTrackModal(true)}
       />
     )
@@ -2793,13 +3289,23 @@ export default function App() {
   else if (page === "Orders") content = <OrdersPage openOrder={openOrder} />
   else if (page === "Assignment")
     content = (
-      <AssignmentPage openModal={() => setModal(true)} openOrder={openOrder} />
+      <AssignmentPage
+        openModal={() => handleOpenAssign("SXP-240519-8842", true)}
+        openOrder={openOrder}
+      />
     )
   else if (page === "Drivers") content = <DriversPage openOrder={openOrder} />
   else if (page === "Exceptions")
-    content = <ExceptionsPage openOrder={openOrder} />
+    content = (
+      <ExceptionsPage
+        openOrder={openOrder}
+        onAssignOrder={handleOpenAssign}
+        refreshTrigger={refreshTrigger}
+      />
+    )
   else if (page === "Reports") content = <ReportsPage />
   else content = <SettingsPage />
+
   return (
     <AppShell
       page={page}
@@ -2809,7 +3315,17 @@ export default function App() {
       }}
     >
       {content}
-      {modal && <AssignModal close={() => setModal(false)} orderId={order} />}
+      {modal && (
+        <AssignModal
+          close={() => {
+            setModal(false)
+            setAssignOrderId(null)
+          }}
+          orderId={assignOrderId || order}
+          isFailed={assignIsFailed}
+          onSuccess={() => setRefreshTrigger((prev) => prev + 1)}
+        />
+      )}
       {trackModal && order && (
         <TrackDriverModal close={() => setTrackModal(false)} orderId={order} />
       )}
