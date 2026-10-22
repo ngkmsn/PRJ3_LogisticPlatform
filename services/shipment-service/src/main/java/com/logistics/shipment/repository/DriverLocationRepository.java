@@ -29,4 +29,18 @@ public class DriverLocationRepository implements PanacheRepositoryBase<DriverLoc
         }
         return delete("driverId", driverId.trim());
     }
+
+    public long countActiveSince(java.time.Instant threshold) {
+        if (threshold == null) {
+            return 0;
+        }
+        return count("timestamp >= ?1", threshold);
+    }
+
+    public long countStaleBefore(java.time.Instant threshold) {
+        if (threshold == null) {
+            return 0;
+        }
+        return count("timestamp < ?1", threshold);
+    }
 }

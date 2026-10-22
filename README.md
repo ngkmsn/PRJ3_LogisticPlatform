@@ -2616,6 +2616,215 @@ Cho phép Operations (Dispatchers, Administrators) theo dõi vị trí GPS thờ
 
 ---
 
+## Map & Routing Service: Tích hợp Map Service (PB-047)
+
+### 1. Mục tiêu & Phạm vi
+- Cung cấp khả năng tính toán đường đi (direction/routing), khoảng cách (distance), thời gian di chuyển (duration), danh sách tọa độ polyline và chỉ đường từng chặng (turn-by-turn navigation steps) cho hệ thống Logistics.
+- Hỗ trợ Geocoding (chuyển đổi địa chỉ sang tọa độ lat/lon) và Reverse Geocoding (chuyển đổi tọa độ sang địa chỉ).
+- Hỗ trợ tính toán lộ trình từ vị trí GPS thời gian thực của Driver đến địa chỉ giao hàng của đơn hàng (`GET /tracking/orders/{orderId}/directions`).
+- Tách biệt hoàn toàn tầng kết nối nhà cung cấp bản đồ (Map Provider) khỏi business logic của các microservice thông qua interface `MapProviderClient`.
+- Không hardcode thông tin xác thực hay phụ thuộc độc quyền vào một nhà cung cấp cụ thể (Google Maps); hỗ trợ linh hoạt các nhà cung cấp:
+  1. `MOCK`: Engine nội bộ tính toán khoảng cách Haversine chuẩn IUGG, hệ số uốn lượn đường phố (urban road factor 1.28x), tốc độ theo phương tiện (xe máy, ô tô, xe tải, xe đạp), sinh chỉ dẫn rẽ và tọa độ đường đi mô phỏng; tích hợp từ điển geocoding các địa danh Việt Nam.
+  2. `OSRM`: Open Source Routing Machine tiêu chuẩn OpenStreetMap (REST JSON protocol).
+  3. `GENERIC_REST`: Tích hợp với dịch vụ REST Map API của bên thứ 3 hoặc tự triển khai qua API Key.
+- **Khả năng chịu lỗi và tính độc lập (Resilience & Safe Degradation)**:
+  - Khi Map Service bên ngoài bị timeout, lỗi kết nối (ConnectException, 5xx), vượt quá rate limit (429) hoặc thiếu API key:
+    - Nếu bật fallback (`MAP_FALLBACK_ENABLED=true`), hệ thống tự động suy thoái an toàn (graceful degradation) sang công thức tính toán khoảng cách Haversine và ước lượng thời gian di chuyển thực tế (`FALLBACK_HAVERSINE`), trả về kết quả kèm cờ `fallback: true`.
+    - Đảm bảo việc Map Service tạm thời không khả dụng **tuyệt đối không làm sập** các chức năng cốt lõi của hệ thống Logistics (như tạo đơn hàng, phân công driver, cập nhật vị trí GPS hay theo dõi trạng thái đơn hàng).
+
+### 2. Cấu hình biến môi trường (Environment Variables)
+
+| Biến môi trường | Thuộc tính Quarkus | Giá trị mặc định | Mô tả |
+|---|---|---|---|
+| `MAP_PROVIDER_TYPE` | `logistics.map.provider.type` | `MOCK` | Nhà cung cấp bản đồ (`MOCK`, `OSRM`, `GENERIC_REST`) |
+| `MAP_SERVICE_URL` | `logistics.map.service.url` | `http://localhost:5000` | URL endpoint của Map Service (hoặc OSRM) |
+| `MAP_API_KEY` | `logistics.map.api.key` | _(trống)_ | API Key xác thực với nhà cung cấp (tùy chọn với Mock/OSRM, bắt buộc với Generic REST) |
+| `MAP_TIMEOUT_MS` | `logistics.map.timeout-ms` | `3000` | Thời gian timeout gọi Map Service (mili-giây) |
+| `MAP_FALLBACK_ENABLED` | `logistics.map.fallback.enabled` | `true` | Cho phép tự động chuyển sang fallback Haversine khi nhà cung cấp lỗi/timeout |
+| `MAP_RATE_LIMIT_PERMITS_PER_SECOND` | `logistics.map.rate-limit.permits-per-second` | `50` | Giới hạn số lượng request tối đa mỗi giây (Token Bucket Rate Limiter) |
+
+### 3. Danh sách API Endpoints
+
+| Phương thức | Endpoint | Mô tả |
+|---|---|---|
+| `POST` | `/tracking/map/directions` | Tính toán lộ trình và direction từ body JSON |
+| `GET` | `/tracking/map/directions` | Tính toán lộ trình qua query params (`originLat`, `originLon`, `destLat`, `destLon`, `vehicleMode`) |
+| `GET` | `/tracking/map/geocode` | Geocode địa chỉ văn bản thành tọa độ (`?address=...`) |
+| `GET` | `/tracking/map/reverse-geocode` | Reverse geocode tọa độ thành địa chỉ (`?lat=...&lon=...`) |
+| `GET` | `/tracking/orders/{orderId}/directions` | Lấy lộ trình từ vị trí GPS Driver đến điểm giao hàng của Order |
+| `GET / POST` | `/api/tracking/map/**` | Alias định tuyến qua API Gateway |
+| `GET / POST` | `/shipments/map/**` | Alias qua context path shipments |
+
+### 4. Ví dụ Request & Response
+
+#### Request: Tính toán lộ trình (POST `/tracking/map/directions`)
+```json
+{
+  "origin": {
+    "latitude": 10.7769,
+    "longitude": 106.7009
+  },
+  "destination": {
+    "latitude": 10.7540,
+    "longitude": 106.6660
+  },
+  "vehicleMode": "MOTORCYCLE"
+}
+```
+
+#### Response: Kết quả lộ trình thành công (200 OK)
+```json
+{
+  "success": true,
+  "message": "Route directions calculated successfully",
+  "data": {
+    "success": true,
+    "distanceMeters": 6420.0,
+    "distanceKm": 6.42,
+    "durationSeconds": 722,
+    "durationMinutes": 12,
+    "summary": "Route from (10.7769, 106.7009) to (10.7540, 106.6660) via MOTORCYCLE",
+    "geometry": [
+      { "latitude": 10.7769, "longitude": 106.7009 },
+      { "latitude": 10.7723, "longitude": 106.6939 },
+      { "latitude": 10.7677, "longitude": 106.6869 },
+      { "latitude": 10.7631, "longitude": 106.6799 },
+      { "latitude": 10.7585, "longitude": 106.6729 },
+      { "latitude": 10.7540, "longitude": 106.6660 }
+    ],
+    "steps": [
+      {
+        "instruction": "Depart from origin heading towards main arterial route",
+        "distanceMeters": 1284.0,
+        "durationSeconds": 144.4,
+        "maneuver": "depart"
+      },
+      {
+        "instruction": "Continue straight along primary road for 3.2 km",
+        "distanceMeters": 3210.0,
+        "durationSeconds": 361.0,
+        "maneuver": "straight"
+      },
+      {
+        "instruction": "Turn right towards destination access road",
+        "distanceMeters": 1348.2,
+        "durationSeconds": 151.6,
+        "maneuver": "turn-right"
+      },
+      {
+        "instruction": "Arrive at destination on the right",
+        "distanceMeters": 577.8,
+        "durationSeconds": 65.0,
+        "maneuver": "arrive"
+      }
+    ],
+    "provider": "MOCK",
+    "fallback": false,
+    "message": null
+  }
+}
+```
+
+
+---
+
+## Operations Dashboard (PB-048)
+
+Hệ thống cung cấp giao diện và API tổng hợp dành riêng cho vai trò Operations (`DISPATCHER`, `ADMIN`) để giám sát các chỉ số vận hành chính của toàn bộ nền tảng Logistics trong thời gian thực.
+
+### 1. Kiến trúc tổng hợp & Cô lập Bounded Context
+- **Nguyên tắc cơ sở dữ liệu độc lập (Database-per-Service)**: Không truy cập trực tiếp database của microservice khác (`order_db`, `user_db`, `shipment_db` hoàn toàn cô lập ở tầng DB role).
+- **Aggregator Pattern**: Service `shipment-service` đóng vai trò Aggregator cung cấp endpoint `GET /api/shipments/operations/dashboard`. Aggregator gọi HTTP song song tới:
+  - `order-service` (`GET /api/orders/metrics`) để lấy số liệu đơn hàng (tổng số order, số order theo từng trạng thái, số order tạo trong ngày, danh sách recent orders).
+  - `user-service` (`GET /api/drivers/metrics`) để lấy số liệu tài xế theo trạng thái tài khoản và availability cơ sở (`AVAILABLE` vs `UNAVAILABLE`).
+  - Dữ liệu nội bộ `shipment_db` để xác định chính xác số lượng driver đang có active assignment (`BUSY`), đơn hàng `UNASSIGNED`, đơn hàng `FAILED`, và thống kê telemetry GPS (Active pings vs Stale > 30 min).
+- **Ngăn ngừa đếm trùng (Double Counting Avoidance)**: Tài xế có availability `AVAILABLE` ở `user-service` nhưng đang thực hiện chuyến đi (`ASSIGNED` hoặc `IN_TRANSIT`) tại `shipment-service` được phân loại chính xác là `BUSY`, và số lượng `AVAILABLE` (rảnh rỗi) được tính toán chuẩn xác: `max(0, baseAvailable - busyCount)`.
+- **Phục hồi & Suy giảm linh hoạt (Resilience & Graceful Degradation)**: Thiết lập HTTP Timeout 3s kèm cơ chế fallback; sự cố mạng hoặc downtime của `order-service` hoặc `user-service` không làm sập dashboard mà vẫn trả về dữ liệu khả dụng từ các service còn lại.
+- **In-Memory Caching**: Cache kết quả tổng hợp 15 giây (`logistics.dashboard.cache.ttl-seconds=15`), hỗ trợ bypass qua query parameter `?refresh=true` khi Operator cần cập nhật tức thời.
+- **Bảo mật & Quyền riêng tư (Privacy & RBAC)**:
+  - Chỉ tài khoản có vai trò `DISPATCHER` hoặc `ADMIN` được phép truy cập (`403 Forbidden` cho `CUSTOMER` và `DRIVER`).
+  - Không tải toàn bộ tọa độ GPS hay bản đồ live của tất cả tài xế về client; chỉ cung cấp các chỉ số tổng hợp (Active vs Stale GPS telemetry) và các mục cảnh báo vận hành cần xử lý (`Attention Items`).
+
+### 2. Danh sách API Endpoints
+
+| Phương thức | Endpoint | Direct Endpoint | Quyền hạn | Mô tả |
+|---|---|---|---|---|
+| `GET` | `/api/shipments/operations/dashboard` | `/shipments/operations/dashboard` | `DISPATCHER`, `ADMIN` | Lấy dữ liệu tổng hợp Dashboard (hỗ trợ `?refresh=true`) |
+| `GET` | `/api/orders/metrics` | `/orders/metrics` | `DISPATCHER`, `ADMIN` | Chỉ số thống kê đơn hàng từ authoritative service `order-service` |
+| `GET` | `/api/drivers/metrics` | `/drivers/metrics` | `DISPATCHER`, `ADMIN` | Chỉ số thống kê tài xế từ authoritative service `user-service` |
+
+### 3. Cấu trúc Dữ liệu Dashboard
+
+```json
+{
+  "success": true,
+  "message": "Operations dashboard metrics retrieved successfully",
+  "data": {
+    "orderMetrics": {
+      "totalOrders": 142,
+      "pendingOrders": 12,
+      "assignedOrders": 18,
+      "inTransitOrders": 24,
+      "deliveredOrders": 85,
+      "cancelledOrders": 1,
+      "failedOrders": 2,
+      "ordersCreatedToday": 35,
+      "recentOrders": [
+        {
+          "id": "ORD-10023",
+          "orderNumber": "ORD-10023",
+          "status": "PENDING",
+          "pickupAddress": "123 Le Loi, District 1, HCMC",
+          "deliveryAddress": "456 Nguyen Trai, District 5, HCMC",
+          "createdAt": "2026-10-22T08:30:00Z"
+        }
+      ]
+    },
+    "driverMetrics": {
+      "totalDrivers": 50,
+      "activeDrivers": 46,
+      "suspendedDrivers": 4,
+      "availableDrivers": 22,
+      "busyDrivers": 18,
+      "unavailableDrivers": 10,
+      "activeGpsDrivers": 38,
+      "staleGpsDrivers": 2
+    },
+    "activeAssignmentsCount": 42,
+    "unassignedOrdersCount": 12,
+    "failedOrdersCount": 2,
+    "attentionItems": [
+      {
+        "id": "ATTN-ORD-1",
+        "type": "UNASSIGNED_ORDER",
+        "severity": "HIGH",
+        "referenceId": "ORD-10023",
+        "message": "Order ORD-10023 is UNASSIGNED and awaiting driver dispatch",
+        "createdAt": "2026-10-22T08:30:00Z"
+      },
+      {
+        "id": "ATTN-FAIL-2",
+        "type": "FAILED_DELIVERY",
+        "severity": "CRITICAL",
+        "referenceId": "ORD-10020",
+        "message": "Delivery failed for order ORD-10020: Customer unreachable. Action required: reassign or contact customer.",
+        "createdAt": "2026-10-22T08:15:00Z"
+      }
+    ],
+    "generatedAt": "2026-10-22T09:00:00Z",
+    "cached": false
+  }
+}
+```
+
+### 4. Giao diện Vận hành (Operations Frontend)
+- Tích hợp trực tiếp trong ứng dụng `fe_dispatcher` (React + TypeScript).
+- Hiển thị thanh KPI thống kê: Tổng đơn hàng, Đơn chờ xử lý (Pending), Đơn đang giao (In Transit), Đơn hoàn tất (Delivered), Đơn thất bại (Failed), Tài xế sẵn sàng (Available), Tài xế bận (Busy), Tài xế ngoại tuyến (Offline), và Tín hiệu GPS (Active / Stale).
+- Thẻ cảnh báo tác vụ cần chú ý (Operational Attention): Cảnh báo đơn chờ điều phối, đơn giao thất bại cần reassign, tài xế mất tín hiệu GPS.
+- Hỗ trợ đầy đủ trạng thái: Loading skeleton, Error banner với nút Thử lại (Retry), Màn hình 403 Access Denied khi không có quyền, Empty state, và Nút Làm mới dữ liệu tức thời (Bypass cache).
+
+---
+
 ## Roadmap
 
 | PB Item | Scope | Status |
@@ -2666,6 +2875,8 @@ Cho phép Operations (Dispatchers, Administrators) theo dõi vị trí GPS thờ
 | **PB-044** | Driver Management & Tracking: Driver gửi GPS location, validate tọa độ & cập nhật vị trí mới nhất | ✅ Completed |
 | **PB-045** | Customer Tracking: Customer xem vị trí Driver đang giao hàng, kiểm tra quyền sở hữu & trạng thái tracking | ✅ Completed |
 | **PB-046** | Operations Tracking: Operations theo dõi Driver, kiểm tra vị trí thời gian thực, trạng thái, active order & RBAC | ✅ Completed |
+| **PB-047** | Map & Routing: Tích hợp Map Service, tính toán direction, lộ trình, geocoding & fallback resilience | ✅ Completed |
+| **PB-048** | Operations Dashboard: API tổng hợp chỉ số vận hành, đơn hàng, tài xế, telemetry, attention items & caching | ✅ Completed |
 
 
 

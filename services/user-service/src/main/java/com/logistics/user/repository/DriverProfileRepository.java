@@ -24,4 +24,12 @@ public class DriverProfileRepository implements PanacheRepositoryBase<DriverProf
     public boolean existsByLicenseNumberAndIdNot(String licenseNumber, String id) {
         return count("licenseNumber = ?1 and id != ?2", licenseNumber, id) > 0;
     }
+
+    public long countByAvailability(com.logistics.common.model.DriverAvailability availability) {
+        return count("availability", availability);
+    }
+
+    public long countByStatus(String status) {
+        return count("status", status);
+    }
 }

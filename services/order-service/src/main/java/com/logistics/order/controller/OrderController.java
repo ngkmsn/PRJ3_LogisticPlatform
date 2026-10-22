@@ -44,6 +44,13 @@ public class OrderController {
         return Response.ok(ApiResponse.ok("Order history retrieved successfully", history)).build();
     }
 
+    @GET
+    @Path("/metrics")
+    public Response getOrderMetrics(@HeaderParam("Authorization") String authHeader) {
+        com.logistics.common.dto.OrderMetricsDto metrics = orderService.getOrderMetrics(authHeader);
+        return Response.ok(ApiResponse.ok("Order metrics retrieved successfully", metrics)).build();
+    }
+
 
     @GET
     public Response listMyOrders(

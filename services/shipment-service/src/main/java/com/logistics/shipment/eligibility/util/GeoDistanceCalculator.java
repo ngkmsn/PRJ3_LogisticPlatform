@@ -28,34 +28,7 @@ public final class GeoDistanceCalculator {
      * @return distance in kilometers, rounded to 2 decimal places, or null if any coordinate is invalid
      */
     public static Double calculateDistanceKm(Double lat1, Double lon1, Double lat2, Double lon2) {
-        if (!isValidCoordinate(lat1, lon1) || !isValidCoordinate(lat2, lon2)) {
-            return null;
-        }
-
-        // Exact match optimization
-        if (Double.compare(lat1, lat2) == 0 && Double.compare(lon1, lon2) == 0) {
-            return 0.0;
-        }
-
-        double dLat = Math.toRadians(lat2 - lat1);
-        double dLon = Math.toRadians(lon2 - lon1);
-
-        double radLat1 = Math.toRadians(lat1);
-        double radLat2 = Math.toRadians(lat2);
-
-        double a = Math.sin(dLat / 2.0) * Math.sin(dLat / 2.0)
-                + Math.cos(radLat1) * Math.cos(radLat2) * Math.sin(dLon / 2.0) * Math.sin(dLon / 2.0);
-
-        // Clamp 'a' to avoid precision issues outside [0, 1]
-        a = Math.min(1.0, Math.max(0.0, a));
-
-        double c = 2.0 * Math.atan2(Math.sqrt(a), Math.sqrt(1.0 - a));
-        double rawDistance = EARTH_RADIUS_KM * c;
-
-        // Round to 2 decimal places for consistent representation
-        return BigDecimal.valueOf(rawDistance)
-                .setScale(2, RoundingMode.HALF_UP)
-                .doubleValue();
+        return com.logistics.common.util.GeoDistanceCalculator.calculateDistanceKm(lat1, lon1, lat2, lon2);
     }
 
     /**

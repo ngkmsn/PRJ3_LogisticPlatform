@@ -138,4 +138,64 @@ public class GlobalExceptionHandler {
                     .build();
         }
     }
+
+    @Provider
+    public static class MapInvalidRequestMapper implements ExceptionMapper<com.logistics.shipment.map.exception.MapInvalidRequestException> {
+        @Override
+        public Response toResponse(com.logistics.shipment.map.exception.MapInvalidRequestException exception) {
+            log.warn("Map invalid request: {}", exception.getMessage());
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .type(MediaType.APPLICATION_JSON)
+                    .entity(ApiResponse.error("Invalid map request: " + exception.getMessage()))
+                    .build();
+        }
+    }
+
+    @Provider
+    public static class MapConfigurationMapper implements ExceptionMapper<com.logistics.shipment.map.exception.MapConfigurationException> {
+        @Override
+        public Response toResponse(com.logistics.shipment.map.exception.MapConfigurationException exception) {
+            log.error("Map configuration error: {}", exception.getMessage());
+            return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
+                    .type(MediaType.APPLICATION_JSON)
+                    .entity(ApiResponse.error("Map service configuration error: " + exception.getMessage()))
+                    .build();
+        }
+    }
+
+    @Provider
+    public static class MapServiceTimeoutMapper implements ExceptionMapper<com.logistics.shipment.map.exception.MapServiceTimeoutException> {
+        @Override
+        public Response toResponse(com.logistics.shipment.map.exception.MapServiceTimeoutException exception) {
+            log.error("Map service timeout: {}", exception.getMessage());
+            return Response.status(504) // Gateway Timeout
+                    .type(MediaType.APPLICATION_JSON)
+                    .entity(ApiResponse.error("Map service timed out: " + exception.getMessage()))
+                    .build();
+        }
+    }
+
+    @Provider
+    public static class MapServiceUnavailableMapper implements ExceptionMapper<com.logistics.shipment.map.exception.MapServiceUnavailableException> {
+        @Override
+        public Response toResponse(com.logistics.shipment.map.exception.MapServiceUnavailableException exception) {
+            log.error("Map service unavailable: {}", exception.getMessage());
+            return Response.status(Response.Status.SERVICE_UNAVAILABLE)
+                    .type(MediaType.APPLICATION_JSON)
+                    .entity(ApiResponse.error("Map service unavailable: " + exception.getMessage()))
+                    .build();
+        }
+    }
+
+    @Provider
+    public static class MapRateLimitMapper implements ExceptionMapper<com.logistics.shipment.map.exception.MapRateLimitException> {
+        @Override
+        public Response toResponse(com.logistics.shipment.map.exception.MapRateLimitException exception) {
+            log.warn("Map rate limit exceeded: {}", exception.getMessage());
+            return Response.status(429) // Too Many Requests
+                    .type(MediaType.APPLICATION_JSON)
+                    .entity(ApiResponse.error("Map request rate limit exceeded: " + exception.getMessage()))
+                    .build();
+        }
+    }
 }

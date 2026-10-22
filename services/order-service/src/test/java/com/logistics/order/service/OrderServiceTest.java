@@ -34,11 +34,14 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
 
+import java.time.Instant;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
 class OrderServiceTest {
@@ -724,6 +727,57 @@ class OrderServiceTest {
         assertThatThrownBy(() -> orderService.createOrder(customerToken, request))
                 .isInstanceOf(RuntimeException.class)
                 .hasMessageContaining("Database error saving outbox event");
+    }
+
+    @Test
+    @DisplayName("PB-048: Dispatcher can successfully retrieve order metrics")
+    void getOrderMetrics_dispatcher_returnsMetrics() {
+        when(orderRepository.count()).thenReturn(100L);
+        when(orderRepository.countCreatedSince(any())).thenReturn(25L);
+        when(orderRepository.countByStatus(OrderStatus.PENDING)).thenReturn(10L);
+        when(orderRepository.countByStatus(OrderStatus.CONFIRMED)).thenReturn(5L);
+        when(orderRepository.countByStatus(OrderStatus.ASSIGNED)).thenReturn(15L);
+        when(orderRepository.countByStatus(OrderStatus.IN_TRANSIT)).thenReturn(20L);
+        when(orderRepository.countByStatus(OrderStatus.DELIVERED)).thenReturn(40L);
+        when(orderRepository.countByStatus(OrderStatus.CANCELLED)).thenReturn(10L);
+
+        Order sampleOrder = new Order();
+        sampleOrder.setId("ord-sample-01");
+        sampleOrder.setOrderNumber("ORD-20261022-001");
+        sampleOrder.setCustomerId("cust-01");
+        sampleOrder.setRecipientName("Nguyen Van A");
+        sampleOrder.setDeliveryAddress("123 Le Loi, Hanoi");
+        sampleOrder.setStatus(OrderStatus.PENDING);
+        sampleOrder.setTotalAmount(new BigDecimal("100000.00"));
+        sampleOrder.setCreatedAt(Instant.now());
+
+        when(orderRepository.findRecentOrders(10)).thenReturn(List.of(sampleOrder));
+
+        com.logistics.common.dto.OrderMetricsDto metrics = orderService.getOrderMetrics(dispatcherToken);
+
+        assertThat(metrics).isNotNull();
+        assertThat(metrics.getTotalOrders()).isEqualTo(100L);
+        assertThat(metrics.getTodayOrders()).isEqualTo(25L);
+        assertThat(metrics.getPendingOrders()).isEqualTo(10L);
+        assertThat(metrics.getDeliveredOrders()).isEqualTo(40L);
+        assertThat(metrics.getOrdersByStatus()).containsEntry("PENDING", 10L);
+        assertThat(metrics.getRecentOrders()).hasSize(1);
+        assertThat(metrics.getRecentOrders().get(0).getOrderNumber()).isEqualTo("ORD-20261022-001");
+    }
+
+    @Test
+    @DisplayName("PB-048: Customer role is denied access to order metrics (403 Forbidden)")
+    void getOrderMetrics_customerRole_throwsAccessDenied() {
+        assertThatThrownBy(() -> orderService.getOrderMetrics(customerToken))
+                .isInstanceOf(AccessDeniedException.class)
+                .hasMessageContaining("Operations or Admin role required");
+    }
+
+    @Test
+    @DisplayName("PB-048: Missing or invalid token throws BadCredentialsException (401 Unauthorized)")
+    void getOrderMetrics_invalidToken_throwsBadCredentials() {
+        assertThatThrownBy(() -> orderService.getOrderMetrics("Bearer invalid.token.xyz"))
+                .isInstanceOf(BadCredentialsException.class);
     }
 }
 

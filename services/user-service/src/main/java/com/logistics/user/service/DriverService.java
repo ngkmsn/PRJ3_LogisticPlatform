@@ -360,6 +360,29 @@ public class DriverService {
         return DriverAvailabilityDto.from(profile);
     }
 
+    public com.logistics.common.dto.DriverOperationalMetricsDto getDriverOperationalMetrics(String authHeader) {
+        User caller = resolveAuthenticatedUser(authHeader);
+
+        if (caller.getRole() != UserRole.ADMIN && caller.getRole() != UserRole.DISPATCHER) {
+            log.warn("Access denied: caller role '{}' cannot view driver operational metrics", caller.getRole());
+            throw new AccessDeniedException("Access denied: Administrator or Dispatcher privileges required");
+        }
+
+        com.logistics.common.dto.DriverOperationalMetricsDto dto = new com.logistics.common.dto.DriverOperationalMetricsDto();
+        dto.setTotalDrivers(driverProfileRepository.count());
+        dto.setAvailableDrivers(driverProfileRepository.countByAvailability(DriverAvailability.AVAILABLE));
+        dto.setBusyDrivers(0L);
+        dto.setUnavailableDrivers(driverProfileRepository.countByAvailability(DriverAvailability.UNAVAILABLE));
+
+        java.util.Map<String, Long> statusMap = new java.util.HashMap<>();
+        statusMap.put("ACTIVE", driverProfileRepository.countByStatus("ACTIVE"));
+        statusMap.put("INACTIVE", driverProfileRepository.countByStatus("INACTIVE"));
+        statusMap.put("SUSPENDED", driverProfileRepository.countByStatus("SUSPENDED"));
+        dto.setDriversByStatus(statusMap);
+
+        return dto;
+    }
+
     private DriverProfile findDriverProfileByIdOrUserId(String id) {
         return driverProfileRepository.findByIdOptional(id)
                 .or(() -> driverProfileRepository.findByUserId(id))

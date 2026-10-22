@@ -79,6 +79,13 @@ public class DriverController {
     }
 
     @GET
+    @Path("/metrics")
+    public Response getDriverOperationalMetrics(@HeaderParam("Authorization") String authHeader) {
+        com.logistics.common.dto.DriverOperationalMetricsDto metrics = driverService.getDriverOperationalMetrics(authHeader);
+        return Response.ok(ApiResponse.ok("Driver operational metrics retrieved successfully", metrics)).build();
+    }
+
+    @GET
     @Path("/{id}")
     public Response getDriverById(
             @HeaderParam("Authorization") String authHeader,

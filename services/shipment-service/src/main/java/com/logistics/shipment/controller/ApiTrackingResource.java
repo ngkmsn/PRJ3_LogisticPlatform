@@ -72,6 +72,14 @@ public class ApiTrackingResource {
     }
 
     @GET
+    @Path("/orders/{orderId}/directions")
+    public Response getOrderDirections(
+            @HeaderParam("Authorization") String authHeader,
+            @PathParam("orderId") String orderId) {
+        return trackingController.getOrderDirections(authHeader, orderId);
+    }
+
+    @GET
     @Path("/operations/drivers")
     public Response getDriversMonitoring(
             @HeaderParam("Authorization") String authHeader,

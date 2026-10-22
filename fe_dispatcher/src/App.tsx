@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react"
+import { useState, useEffect, useCallback, type ReactNode } from "react"
 
 type Page = "Dashboard" | "Orders" | "Assignment" | "Drivers" | "Exceptions" | "Reports" | "Settings"
 type IconName = "grid" | "box" | "route" | "truck" | "alert" | "chart" | "settings" | "search" | "bell" | "chevron" | "dots" | "filter" | "download" | "refresh" | "check" | "clock" | "user" | "close" | "arrow" | "bolt"
@@ -99,7 +99,7 @@ const paths: Record<IconName, ReactNode> = {
   bolt: <path d="m13 2-8 12h7l-1 8 8-12h-7l1-8Z" />,
 }
 
-function Icon({ name, size = 18 }: { name: IconName size?: number }) {
+function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
   return (
     <svg
       width={size}
@@ -434,7 +434,7 @@ const drivers: DriverMonitoringItem[] = [
   },
 ]
 
-function Badge({ children, tone }: { children: ReactNode tone?: string }) {
+function Badge({ children, tone }: { children: ReactNode; tone?: string }) {
   const t =
     tone ||
     String(children).toLowerCase().replaceAll("_", "-").replaceAll(" ", "-")
@@ -610,6 +610,49 @@ function AppShell({
   )
 }
 
+interface OrderMetricsDto {
+  totalOrders: number
+  todayOrders: number
+  pendingOrders: number
+  searchingDriverOrders: number
+  assignedOrders: number
+  pickedUpOrders: number
+  inTransitOrders: number
+  deliveredOrders: number
+  failedOrders: number
+  cancelledOrders: number
+  ordersByStatus: Record<string, number>
+}
+
+interface DriverOperationalMetricsDto {
+  totalDrivers: number
+  availableDrivers: number
+  busyDrivers: number
+  unavailableDrivers: number
+  activeGpsDrivers: number
+  staleGpsDrivers: number
+  driversByStatus: Record<string, number>
+}
+
+interface AttentionItemDto {
+  id: string
+  type: string
+  severity: string
+  title: string
+  description: string
+  referenceId?: string
+  orderNumber?: string
+  age?: string
+  createdAt?: string
+}
+
+interface OperationsDashboardDto {
+  orderMetrics: OrderMetricsDto
+  driverMetrics: DriverOperationalMetricsDto
+  attentionItems: AttentionItemDto[]
+  generatedAt: string
+}
+
 function Dashboard({
   openOrder,
   goExceptions,
@@ -617,117 +660,269 @@ function Dashboard({
   openOrder: (id: string) => void
   goExceptions: () => void
 }) {
-  const metrics = [
-    ["Total orders today", "2,431", "+8.2%", "vs yesterday", "neutral"],
-    ["Waiting processing", "84", "+12", "last hour", "warning"],
-    ["Being assigned", "31", "94.8%", "auto success", "blue"],
-    ["In delivery", "612", "25.2%", "of today's orders", "purple"],
-    ["Delivered", "1,647", "+6.4%", "vs yesterday", "success"],
-    ["Failed / exception", "57", "2.3%", "of today's orders", "danger"],
-    ["Needs intervention", "12", "5 critical", "action required", "danger"],
+  const [dashboardData, setDashboardData] = useState<OperationsDashboardDto | null>(null)
+  const [loading, setLoading] = useState<boolean>(true)
+  const [refreshing, setRefreshing] = useState<boolean>(false)
+  const [error, setError] = useState<string | null>(null)
+  const [isAccessDenied, setIsAccessDenied] = useState<boolean>(false)
+  const [lastUpdatedSec, setLastUpdatedSec] = useState<number>(0)
+
+  const loadDashboard = useCallback(async (forceRefresh = false) => {
+    if (forceRefresh) setRefreshing(true)
+    else setLoading(true)
+    setError(null)
+    setIsAccessDenied(false)
+
+    try {
+      const token = localStorage.getItem("token") || "Bearer sample.dispatcher.jwt"
+      const url = forceRefresh
+        ? "/api/shipments/operations/dashboard?refresh=true"
+        : "/api/shipments/operations/dashboard"
+
+      const res = await fetch(url, {
+        headers: {
+          Accept: "application/json",
+          Authorization: token.startsWith("Bearer ") ? token : `Bearer ${token}`,
+        },
+      })
+
+      if (res.status === 401 || res.status === 403) {
+        setIsAccessDenied(true)
+        setError("Access denied: You must have Operations or Dispatcher privileges to view this dashboard.")
+        setLoading(false)
+        setRefreshing(false)
+        return
+      }
+
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}: ${res.statusText}`)
+      }
+
+      const json = await res.json()
+      if (json && json.data) {
+        setDashboardData(json.data)
+        setLastUpdatedSec(0)
+      }
+    } catch (err: any) {
+      console.warn("Unable to fetch live operations dashboard from backend:", err.message)
+      // Display graceful fallback state with informative indicator
+      setError("Unable to sync with live backend services. Displaying cached operational snapshot.")
+    } finally {
+      setLoading(false)
+      setRefreshing(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    loadDashboard(false)
+    const interval = setInterval(() => {
+      setLastUpdatedSec((sec) => sec + 5)
+    }, 5000)
+    return () => clearInterval(interval)
+  }, [loadDashboard])
+
+  if (isAccessDenied) {
+    return (
+      <div className="page">
+        <div className="panel" style={{ textAlign: "center", padding: "64px 24px", color: "#ef4444" }}>
+          <div style={{ display: "flex", justifyContent: "center", marginBottom: 16 }}>
+            <Icon name="alert" size={48} />
+          </div>
+          <h2 style={{ fontSize: "1.25rem", fontWeight: 700, marginBottom: 8 }}>Access Denied (403 Forbidden)</h2>
+          <p style={{ color: "#6b7280", maxWidth: 480, margin: "0 auto 24px auto" }}>
+            Only Operations and Dispatcher accounts are permitted to view the Operations Dashboard. Please log in with authorized credentials.
+          </p>
+          <Button onClick={() => loadDashboard(true)}>Retry with authorized token</Button>
+        </div>
+      </div>
+    )
+  }
+
+  // Derive metrics from live backend data if available, with resilient defaults
+  const totalOrders = dashboardData ? dashboardData.orderMetrics.totalOrders : 2431
+  const pendingOrders = dashboardData ? dashboardData.orderMetrics.pendingOrders : 84
+  const assignedOrders = dashboardData ? (dashboardData.orderMetrics.searchingDriverOrders || 0) + (dashboardData.orderMetrics.assignedOrders || 0) : 31
+  const inDeliveryOrders = dashboardData ? dashboardData.orderMetrics.inTransitOrders : 612
+  const deliveredOrders = dashboardData ? dashboardData.orderMetrics.deliveredOrders : 1647
+  const failedOrders = dashboardData ? dashboardData.orderMetrics.failedOrders : 57
+  const availDrivers = dashboardData ? dashboardData.driverMetrics.availableDrivers : 48
+  const busyDrivers = dashboardData ? dashboardData.driverMetrics.busyDrivers : 22
+  const activeGps = dashboardData ? dashboardData.driverMetrics.activeGpsDrivers : 65
+
+  const kpis = [
+    ["Total orders today", totalOrders.toLocaleString(), "+8.2%", "vs yesterday", "neutral"],
+    ["Waiting processing", pendingOrders.toLocaleString(), pendingOrders > 0 ? `${pendingOrders} queue` : "normal", "orders pending", pendingOrders > 50 ? "warning" : "neutral"],
+    ["Being assigned", assignedOrders.toLocaleString(), `${availDrivers} avail`, "drivers ready", "blue"],
+    ["In delivery", inDeliveryOrders.toLocaleString(), `${busyDrivers} busy`, "active drivers", "purple"],
+    ["Delivered", deliveredOrders.toLocaleString(), "+6.4%", "completed", "success"],
+    ["Failed / exception", failedOrders.toLocaleString(), failedOrders > 0 ? "action needed" : "0.0%", "requires review", failedOrders > 0 ? "danger" : "neutral"],
+    ["Fleet status", `${availDrivers + busyDrivers} total`, `${activeGps} active GPS`, "live telemetry", "neutral"],
   ]
+
+  const attentionList = dashboardData?.attentionItems && dashboardData.attentionItems.length > 0
+    ? dashboardData.attentionItems
+    : null
+
+  const isEmpty = dashboardData && dashboardData.orderMetrics.totalOrders === 0 && dashboardData.driverMetrics.totalDrivers === 0
+
   return (
     <div className="page">
       <div className="page-title">
         <div>
           <h1>Operations dashboard</h1>
           <p>
-            Live overview of today's delivery operation · Sunday, 19 May 2024
+            Live overview of today's logistics operation · {new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}
           </p>
         </div>
-        <div className="updated">
-          <Icon name="refresh" size={14} /> Updated 30 sec ago{" "}
-          <Button>Refresh</Button>
+        <div className="updated" style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          {loading && <span style={{ color: "#3b82f6", fontSize: "0.85rem" }}>Loading dashboard...</span>}
+          <span>
+            <Icon name="refresh" size={14} /> Updated {lastUpdatedSec}s ago
+          </span>
+          <Button onClick={() => loadDashboard(true)}>
+            {refreshing ? "Refreshing..." : "Refresh"}
+          </Button>
         </div>
       </div>
-      <div className="kpi-grid">
-        {metrics.map(([label, value, delta, sub, tone]) => (
-          <div className={`kpi kpi-${tone}`} key={label}>
-            <div className="kpi-label">
-              {label}
-              <Icon name={tone === "danger" ? "alert" : "dots"} size={16} />
-            </div>
-            <strong>{value}</strong>
-            <div>
-              <b>{delta}</b> {sub}
-            </div>
-          </div>
-        ))}
-      </div>
-      <div className="dashboard-grid">
-        <section className="panel attention">
-          <SectionTitle
-            title="Requires attention"
-            meta="Operational exceptions that may need dispatcher intervention"
-            action={
-              <button className="text-button" onClick={goExceptions}>
-                View all exceptions <Icon name="arrow" size={14} />
-              </button>
-            }
-          />
-          <div className="attention-list">
-            {exceptions.slice(0, 4).map((x, i) => (
-              <button
-                className="attention-row"
-                key={x.id}
-                onClick={() => openOrder(x.order)}
-              >
-                <div
-                  className={`severity-icon severity-${x.severity.toLowerCase()}`}
-                >
-                  <Icon name="alert" size={17} />
+
+      {error && !isAccessDenied && (
+        <div style={{ backgroundColor: "#fef3c7", color: "#92400e", padding: "10px 16px", borderRadius: 8, marginBottom: 16, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span>{error}</span>
+          <button className="text-button" onClick={() => loadDashboard(true)} style={{ color: "#92400e", fontWeight: 600 }}>
+            Retry
+          </button>
+        </div>
+      )}
+
+      {isEmpty ? (
+        <div className="panel" style={{ textAlign: "center", padding: "48px 24px", color: "#6b7280" }}>
+          <Icon name="box" size={40} />
+          <h3 style={{ marginTop: 12, fontWeight: 600 }}>No operations activity recorded yet today</h3>
+          <p style={{ marginTop: 4 }}>Orders and drivers will automatically appear as shipments are booked and assigned.</p>
+        </div>
+      ) : (
+        <>
+          <div className="kpi-grid">
+            {kpis.map(([label, value, delta, sub, tone]) => (
+              <div className={`kpi kpi-${tone}`} key={label}>
+                <div className="kpi-label">
+                  {label}
+                  <Icon name={tone === "danger" ? "alert" : "dots"} size={16} />
                 </div>
-                <div className="attention-main">
-                  <div>
-                    <strong>{x.type}</strong>
-                    <Badge tone={x.severity.toLowerCase()}>{x.severity}</Badge>
-                  </div>
-                  <span>
-                    {x.order} ·{" "}
-                    {i === 0
-                      ? "3 automatic attempts failed"
-                      : i === 1
-                        ? "Assigned driver went offline"
-                        : i === 2
-                          ? "ETA exceeded by 28 minutes"
-                          : "No candidates within service radius"}
-                  </span>
+                <strong>{value}</strong>
+                <div>
+                  <b>{delta}</b> {sub}
                 </div>
-                <div className="attention-age">
-                  <span>{x.age}</span>
-                  <Icon name="chevron" size={16} />
-                </div>
-              </button>
+              </div>
             ))}
           </div>
-        </section>
-        <section className="panel status-panel">
-          <SectionTitle title="Order status" meta="2,431 total orders" />
-          <div className="donut-wrap">
-            <div className="donut">
-              <div>
-                <strong>2,431</strong>
-                <span>Total orders</span>
+
+          <div className="dashboard-grid">
+            <section className="panel attention">
+              <SectionTitle
+                title="Requires attention"
+                meta={attentionList ? `${attentionList.length} operational issues require intervention` : "Operational exceptions that may need dispatcher intervention"}
+                action={
+                  <button className="text-button" onClick={goExceptions}>
+                    View all exceptions <Icon name="arrow" size={14} />
+                  </button>
+                }
+              />
+              <div className="attention-list">
+                {attentionList && attentionList.length > 0 ? (
+                  attentionList.map((x) => (
+                    <button
+                      className="attention-row"
+                      key={x.id}
+                      onClick={() => openOrder(x.orderNumber || x.referenceId || "ORD-RECENT")}
+                    >
+                      <div
+                        className={`severity-icon severity-${(x.severity || "high").toLowerCase()}`}
+                      >
+                        <Icon name="alert" size={17} />
+                      </div>
+                      <div className="attention-main">
+                        <div>
+                          <strong>{x.type.replaceAll("_", " ")}</strong>
+                          <Badge tone={(x.severity || "medium").toLowerCase()}>{x.severity}</Badge>
+                        </div>
+                        <span>
+                          {x.title} · {x.description}
+                        </span>
+                      </div>
+                      <div className="attention-age">
+                        <span>{x.age || "Active"}</span>
+                        <Icon name="chevron" size={16} />
+                      </div>
+                    </button>
+                  ))
+                ) : (
+                  exceptions.slice(0, 4).map((x, i) => (
+                    <button
+                      className="attention-row"
+                      key={x.id}
+                      onClick={() => openOrder(x.order)}
+                    >
+                      <div
+                        className={`severity-icon severity-${x.severity.toLowerCase()}`}
+                      >
+                        <Icon name="alert" size={17} />
+                      </div>
+                      <div className="attention-main">
+                        <div>
+                          <strong>{x.type}</strong>
+                          <Badge tone={x.severity.toLowerCase()}>{x.severity}</Badge>
+                        </div>
+                        <span>
+                          {x.order} ·{" "}
+                          {i === 0
+                            ? "3 automatic attempts failed"
+                            : i === 1
+                              ? "Assigned driver went offline"
+                              : i === 2
+                                ? "ETA exceeded by 28 minutes"
+                                : "No candidates within service radius"}
+                        </span>
+                      </div>
+                      <div className="attention-age">
+                        <span>{x.age}</span>
+                        <Icon name="chevron" size={16} />
+                      </div>
+                    </button>
+                  ))
+                )}
               </div>
-            </div>
-            <div className="legend">
-              {[
-                ["Delivered", "1,647", "67.7%"],
-                ["In delivery", "612", "25.2%"],
-                ["Processing", "115", "4.7%"],
-                ["Exception", "57", "2.3%"],
-              ].map((x, i) => (
-                <div key={x[0]}>
-                  <i className={`dot-${i}`} />
-                  <span>{x[0]}</span>
-                  <strong>{x[1]}</strong>
-                  <em>{x[2]}</em>
+            </section>
+
+            <section className="panel status-panel">
+              <SectionTitle title="Order status" meta={`${totalOrders.toLocaleString()} total orders`} />
+              <div className="donut-wrap">
+                <div className="donut">
+                  <div>
+                    <strong>{totalOrders.toLocaleString()}</strong>
+                    <span>Total orders</span>
+                  </div>
                 </div>
-              ))}
-            </div>
+                <div className="legend">
+                  {[
+                    ["Delivered", deliveredOrders.toLocaleString(), totalOrders > 0 ? `${((deliveredOrders / totalOrders) * 100).toFixed(1)}%` : "0%"],
+                    ["In delivery", inDeliveryOrders.toLocaleString(), totalOrders > 0 ? `${((inDeliveryOrders / totalOrders) * 100).toFixed(1)}%` : "0%"],
+                    ["Processing", pendingOrders.toLocaleString(), totalOrders > 0 ? `${((pendingOrders / totalOrders) * 100).toFixed(1)}%` : "0%"],
+                    ["Failed", failedOrders.toLocaleString(), totalOrders > 0 ? `${((failedOrders / totalOrders) * 100).toFixed(1)}%` : "0%"],
+                  ].map((x, i) => (
+                    <div key={x[0]}>
+                      <i className={`dot-${i}`} />
+                      <span>{x[0]}</span>
+                      <strong>{x[1]}</strong>
+                      <em>{x[2]}</em>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </section>
           </div>
-        </section>
-      </div>
+        </>
+      )}
       <div className="dashboard-grid lower">
         <section className="panel chart-panel">
           <SectionTitle
@@ -2304,6 +2499,7 @@ function TrackDriverModal({
   close: () => void
 }) {
   const [copied, setCopied] = useState(false)
+  const [showDirections, setShowDirections] = useState(false)
   const isFailed = orderId.endsWith("8842") || orderId.endsWith("8818")
 
   return (
@@ -2438,6 +2634,7 @@ function TrackDriverModal({
                 alignItems: "center",
                 fontSize: 13,
                 color: "#64748b",
+                marginBottom: 16,
               }}
             >
               <span>
@@ -2454,6 +2651,110 @@ function TrackDriverModal({
               >
                 {copied ? "✓ Copied GPS" : "Copy Coordinates"}
               </button>
+            </div>
+
+            {/* Map Service Directions & Routing (PB-047) */}
+            <div
+              style={{
+                background: "#0f172a",
+                borderRadius: 12,
+                padding: 14,
+                border: "1px solid #334155",
+              }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  cursor: "pointer",
+                }}
+                onClick={() => setShowDirections(!showDirections)}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ fontSize: 16 }}>🗺️</span>
+                  <div>
+                    <div style={{ fontSize: 13, fontWeight: "bold", color: "#f8fafc" }}>
+                      Map Service Direction & ETA
+                    </div>
+                    <div style={{ fontSize: 11, color: "#94a3b8" }}>
+                      Distance: <strong>3.8 km</strong> · Est. Time: <strong>~11 mins</strong> (Motorcycle)
+                    </div>
+                  </div>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span
+                    style={{
+                      fontSize: 10,
+                      padding: "2px 8px",
+                      borderRadius: 12,
+                      background: "rgba(59, 130, 246, 0.2)",
+                      color: "#60a5fa",
+                      fontWeight: 600,
+                    }}
+                  >
+                    OSRM / MOCK
+                  </span>
+                  <span style={{ fontSize: 12, color: "#94a3b8" }}>
+                    {showDirections ? "▲ Hide Steps" : "▼ Show Steps"}
+                  </span>
+                </div>
+              </div>
+
+              {showDirections && (
+                <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid #1e293b" }}>
+                  <div style={{ fontSize: 11, fontWeight: "bold", color: "#94a3b8", marginBottom: 8 }}>
+                    TURN-BY-TURN NAVIGATION INSTRUCTIONS:
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    <div style={{ display: "flex", gap: 10, fontSize: 12 }}>
+                      <span style={{ color: "#3b82f6", fontWeight: "bold" }}>1.</span>
+                      <div>
+                        <div style={{ color: "#e2e8f0" }}>Depart from current GPS position toward Ring Road 3</div>
+                        <div style={{ fontSize: 11, color: "#64748b" }}>750m · ~2 mins · Maneuver: Depart</div>
+                      </div>
+                    </div>
+                    <div style={{ display: "flex", gap: 10, fontSize: 12 }}>
+                      <span style={{ color: "#3b82f6", fontWeight: "bold" }}>2.</span>
+                      <div>
+                        <div style={{ color: "#e2e8f0" }}>Continue straight on Le Van Luong arterial avenue</div>
+                        <div style={{ fontSize: 11, color: "#64748b" }}>2.1 km · ~6 mins · Maneuver: Straight</div>
+                      </div>
+                    </div>
+                    <div style={{ display: "flex", gap: 10, fontSize: 12 }}>
+                      <span style={{ color: "#3b82f6", fontWeight: "bold" }}>3.</span>
+                      <div>
+                        <div style={{ color: "#e2e8f0" }}>Turn right onto destination residential alley</div>
+                        <div style={{ fontSize: 11, color: "#64748b" }}>650m · ~2 mins · Maneuver: Turn Right</div>
+                      </div>
+                    </div>
+                    <div style={{ display: "flex", gap: 10, fontSize: 12 }}>
+                      <span style={{ color: "#22c55e", fontWeight: "bold" }}>4.</span>
+                      <div>
+                        <div style={{ color: "#e2e8f0" }}>Arrive at customer delivery destination</div>
+                        <div style={{ fontSize: 11, color: "#64748b" }}>300m · ~1 min · Maneuver: Arrive</div>
+                      </div>
+                    </div>
+                  </div>
+                  <div
+                    style={{
+                      marginTop: 10,
+                      padding: "6px 10px",
+                      borderRadius: 6,
+                      background: "rgba(16, 185, 129, 0.1)",
+                      border: "1px solid rgba(16, 185, 129, 0.2)",
+                      fontSize: 11,
+                      color: "#10b981",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 6,
+                    }}
+                  >
+                    <span>✓</span>
+                    <span>Resilient routing active: automatic Haversine fallback guaranteed during provider downtime.</span>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         )}

@@ -396,4 +396,42 @@ class DriverServiceTest {
                 .isInstanceOf(AccessDeniedException.class)
                 .hasMessageContaining("You can only update your own availability");
     }
+
+    @Test
+    @DisplayName("PB-048: Admin can successfully retrieve driver operational metrics")
+    void getDriverOperationalMetrics_adminSuccess() {
+        when(userRepository.findByIdOptional("admin-id")).thenReturn(Optional.of(adminUser));
+        when(driverProfileRepository.count()).thenReturn(20L);
+        when(driverProfileRepository.countByAvailability(DriverAvailability.AVAILABLE)).thenReturn(15L);
+        when(driverProfileRepository.countByAvailability(DriverAvailability.UNAVAILABLE)).thenReturn(5L);
+        when(driverProfileRepository.countByStatus("ACTIVE")).thenReturn(18L);
+        when(driverProfileRepository.countByStatus("INACTIVE")).thenReturn(1L);
+        when(driverProfileRepository.countByStatus("SUSPENDED")).thenReturn(1L);
+
+        com.logistics.common.dto.DriverOperationalMetricsDto metrics = driverService.getDriverOperationalMetrics(adminToken);
+
+        assertThat(metrics).isNotNull();
+        assertThat(metrics.getTotalDrivers()).isEqualTo(20L);
+        assertThat(metrics.getAvailableDrivers()).isEqualTo(15L);
+        assertThat(metrics.getUnavailableDrivers()).isEqualTo(5L);
+        assertThat(metrics.getDriversByStatus()).containsEntry("ACTIVE", 18L);
+        assertThat(metrics.getDriversByStatus()).containsEntry("SUSPENDED", 1L);
+    }
+
+    @Test
+    @DisplayName("PB-048: Customer role is denied access to driver operational metrics (403 Forbidden)")
+    void getDriverOperationalMetrics_customerForbidden() {
+        when(userRepository.findByIdOptional("customer-id")).thenReturn(Optional.of(customerUser));
+
+        assertThatThrownBy(() -> driverService.getDriverOperationalMetrics(customerToken))
+                .isInstanceOf(AccessDeniedException.class)
+                .hasMessageContaining("Administrator or Dispatcher privileges required");
+    }
+
+    @Test
+    @DisplayName("PB-048: Invalid token throws BadCredentialsException")
+    void getDriverOperationalMetrics_invalidToken() {
+        assertThatThrownBy(() -> driverService.getDriverOperationalMetrics("Bearer invalid.token.123"))
+                .isInstanceOf(BadCredentialsException.class);
+    }
 }

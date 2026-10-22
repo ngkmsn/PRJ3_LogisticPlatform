@@ -81,6 +81,18 @@ public class TrackingController {
         return getOrderTracking(authHeader, orderId, allowStale);
     }
 
+    @Inject
+    com.logistics.shipment.map.service.MapService mapService;
+
+    @GET
+    @Path("/orders/{orderId}/directions")
+    public Response getOrderDirections(
+            @HeaderParam("Authorization") String authHeader,
+            @PathParam("orderId") String orderId) {
+        com.logistics.common.dto.RouteDirectionResponse directions = mapService.getOrderDirections(orderId);
+        return Response.ok(ApiResponse.ok("Order directions calculated successfully", directions)).build();
+    }
+
     @GET
     @Path("/operations/drivers")
     public Response getDriversMonitoring(

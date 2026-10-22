@@ -34,6 +34,12 @@ public class ApiOrderResource {
     }
 
     @GET
+    @Path("/metrics")
+    public Response getOrderMetrics(@HeaderParam("Authorization") String authHeader) {
+        return orderController.getOrderMetrics(authHeader);
+    }
+
+    @GET
     @Path("/{id}")
     public Response getOrderDetails(
             @HeaderParam("Authorization") String authHeader,

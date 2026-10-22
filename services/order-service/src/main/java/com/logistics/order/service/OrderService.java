@@ -545,5 +545,60 @@ public class OrderService {
 
         return trackingServiceClient.getOrderTracking(authHeader, order.getId(), allowStale);
     }
+
+    public com.logistics.common.dto.OrderMetricsDto getOrderMetrics(String authHeader) {
+        if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+            throw new BadCredentialsException("Missing or invalid Authorization header");
+        }
+        String token = authHeader.substring(7).trim();
+        if (!jwtTokenProvider.validateToken(token)) {
+            throw new BadCredentialsException("Invalid or expired token");
+        }
+        AuthPrincipal principal = AuthPrincipal.fromJwtToken(token, jwtTokenProvider);
+        if (principal == null || (principal.getRole() != Role.DISPATCHER && principal.getRole() != Role.ADMIN)) {
+            throw new AccessDeniedException("Access denied: Operations or Admin role required");
+        }
+
+        com.logistics.common.dto.OrderMetricsDto dto = new com.logistics.common.dto.OrderMetricsDto();
+        dto.setTotalOrders(orderRepository.count());
+
+        Instant startOfToday = java.time.LocalDate.now(ZoneOffset.UTC).atStartOfDay().toInstant(ZoneOffset.UTC);
+        dto.setTodayOrders(orderRepository.countCreatedSince(startOfToday));
+
+        dto.setPendingOrders(orderRepository.countByStatus(OrderStatus.PENDING));
+        dto.setSearchingDriverOrders(0L);
+        dto.setAssignedOrders(orderRepository.countByStatus(OrderStatus.ASSIGNED));
+        dto.setPickedUpOrders(0L);
+        dto.setInTransitOrders(orderRepository.countByStatus(OrderStatus.IN_TRANSIT));
+        dto.setDeliveredOrders(orderRepository.countByStatus(OrderStatus.DELIVERED));
+        dto.setFailedOrders(0L);
+        dto.setCancelledOrders(orderRepository.countByStatus(OrderStatus.CANCELLED));
+
+        java.util.Map<String, Long> statusMap = new java.util.HashMap<>();
+        for (OrderStatus st : OrderStatus.values()) {
+            statusMap.put(st.name(), orderRepository.countByStatus(st));
+        }
+        dto.setOrdersByStatus(statusMap);
+
+        List<Order> recent = orderRepository.findRecentOrders(10);
+        List<com.logistics.common.dto.OrderSummaryDto> summaryList = new java.util.ArrayList<>();
+        if (recent != null) {
+            for (Order o : recent) {
+                summaryList.add(new com.logistics.common.dto.OrderSummaryDto(
+                        o.getId(),
+                        o.getOrderNumber(),
+                        o.getCustomerId(),
+                        o.getRecipientName(),
+                        o.getDeliveryAddress(),
+                        o.getStatus() != null ? o.getStatus().name() : null,
+                        o.getTotalAmount(),
+                        o.getCreatedAt()
+                ));
+            }
+        }
+        dto.setRecentOrders(summaryList);
+
+        return dto;
+    }
 }
 

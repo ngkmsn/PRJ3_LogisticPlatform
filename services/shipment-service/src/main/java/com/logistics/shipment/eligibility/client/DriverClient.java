@@ -47,4 +47,14 @@ public interface DriverClient {
     default List<EligibleDriver> getAllDrivers(String authHeader) {
         return List.of();
     }
+
+    /**
+     * Retrieves aggregated driver operational metrics from authoritative User Service (PB-048).
+     *
+     * @param authHeader authorization header with Bearer token
+     * @return Optional containing DriverOperationalMetricsDto if available, empty otherwise
+     */
+    default java.util.Optional<com.logistics.common.dto.DriverOperationalMetricsDto> getDriverMetrics(String authHeader) {
+        return java.util.Optional.empty();
+    }
 }

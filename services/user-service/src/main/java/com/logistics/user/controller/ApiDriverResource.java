@@ -64,6 +64,12 @@ public class ApiDriverResource {
     }
 
     @GET
+    @Path("/metrics")
+    public Response getDriverOperationalMetrics(@HeaderParam("Authorization") String authHeader) {
+        return driverController.getDriverOperationalMetrics(authHeader);
+    }
+
+    @GET
     @Path("/{id}")
     public Response getDriverById(
             @HeaderParam("Authorization") String authHeader,

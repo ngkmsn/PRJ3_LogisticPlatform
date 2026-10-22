@@ -173,4 +173,48 @@ public class DefaultDriverClient implements DriverClient {
             throw new DriverDataProviderUnavailableException("User service is currently unavailable: " + e.getMessage(), e);
         }
     }
+
+    @Override
+    public Optional<com.logistics.common.dto.DriverOperationalMetricsDto> getDriverMetrics(String authHeader) {
+        String base = userServiceUrl != null ? userServiceUrl : "http://localhost:8081";
+        if (base.endsWith("/")) {
+            base = base.substring(0, base.length() - 1);
+        }
+        String endpoint = base + "/api/drivers/metrics";
+        log.info("DefaultDriverClient: querying driver metrics from '{}'", endpoint);
+
+        try {
+            HttpRequest.Builder reqBuilder = HttpRequest.newBuilder()
+                    .uri(URI.create(endpoint))
+                    .timeout(Duration.ofSeconds(4))
+                    .header("Accept", "application/json")
+                    .GET();
+
+            if (authHeader != null && !authHeader.isBlank()) {
+                reqBuilder.header("Authorization", authHeader);
+            }
+
+            HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build();
+            HttpResponse<String> response = client.send(reqBuilder.build(), HttpResponse.BodyHandlers.ofString());
+
+            int status = response.statusCode();
+            if (status == 200) {
+                if (objectMapper == null) {
+                    objectMapper = new ObjectMapper().findAndRegisterModules();
+                }
+                JsonNode root = objectMapper.readTree(response.body());
+                JsonNode dataNode = root.path("data");
+                if (!dataNode.isMissingNode() && !dataNode.isNull()) {
+                    com.logistics.common.dto.DriverOperationalMetricsDto dto =
+                            objectMapper.treeToValue(dataNode, com.logistics.common.dto.DriverOperationalMetricsDto.class);
+                    return Optional.ofNullable(dto);
+                }
+            } else {
+                log.warn("DefaultDriverClient: driver metrics returned status: {}", status);
+            }
+        } catch (Exception e) {
+            log.error("DefaultDriverClient: failed to retrieve driver metrics: {}", e.getMessage());
+        }
+        return Optional.empty();
+    }
 }
