@@ -2,6 +2,10 @@ package com.logistics.notification.consumer;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.logistics.common.backpressure.BackpressureConfig;
+import com.logistics.common.backpressure.BackpressureController;
+import com.logistics.common.backpressure.BackpressureExecutionException;
+import com.logistics.common.backpressure.BackpressureRegistry;
 import com.logistics.notification.client.NotificationPlatformClient;
 import com.logistics.notification.client.NotificationPlatformRequest;
 import com.logistics.notification.client.NotificationPlatformResult;
@@ -14,6 +18,7 @@ import io.smallrye.common.annotation.Blocking;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.transaction.Transactional;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.eclipse.microprofile.reactive.messaging.Acknowledgment;
 import org.eclipse.microprofile.reactive.messaging.Incoming;
 import org.eclipse.microprofile.reactive.messaging.Message;
@@ -44,6 +49,23 @@ public class ShipmentNotificationConsumer {
     @Inject
     NotificationTemplateMapper templateMapper;
 
+    @ConfigProperty(name = "notification.consumer.backpressure.enabled", defaultValue = "true")
+    boolean backpressureEnabled = true;
+
+    @ConfigProperty(name = "notification.consumer.backpressure.max-concurrency", defaultValue = "10")
+    int maxConcurrency = 10;
+
+    @ConfigProperty(name = "notification.consumer.backpressure.warning-concurrency", defaultValue = "7")
+    int warningConcurrency = 7;
+
+    @ConfigProperty(name = "notification.consumer.backpressure.high-latency-ms", defaultValue = "1000")
+    long highLatencyMs = 1000;
+
+    @ConfigProperty(name = "notification.consumer.backpressure.recovery-latency-ms", defaultValue = "300")
+    long recoveryLatencyMs = 300;
+
+    private BackpressureController backpressureController;
+
     public ShipmentNotificationConsumer() {
     }
 
@@ -59,6 +81,30 @@ public class ShipmentNotificationConsumer {
         this.templateMapper = templateMapper;
     }
 
+    public BackpressureController getBackpressureController() {
+        if (this.backpressureController == null && backpressureEnabled) {
+            BackpressureConfig config = BackpressureConfig.builder()
+                    .name("shipment-notification-consumer")
+                    .maxConcurrency(Math.max(1, maxConcurrency))
+                    .warningConcurrency(Math.max(1, warningConcurrency))
+                    .highLatencyMs(Math.max(10, highLatencyMs))
+                    .recoveryLatencyMs(Math.max(10, recoveryLatencyMs))
+                    .minPacingDelayMs(20)
+                    .maxPacingDelayMs(200)
+                    .build();
+            this.backpressureController = BackpressureRegistry.getInstance().getOrCreate("shipment-notification-consumer", config);
+        }
+        return this.backpressureController;
+    }
+
+    public void setBackpressureController(BackpressureController backpressureController) {
+        this.backpressureController = backpressureController;
+    }
+
+    public void setBackpressureEnabled(boolean backpressureEnabled) {
+        this.backpressureEnabled = backpressureEnabled;
+    }
+
     @Incoming("shipment-events")
     @Acknowledgment(Acknowledgment.Strategy.MANUAL)
     @Blocking
@@ -66,12 +112,34 @@ public class ShipmentNotificationConsumer {
         String rawJson = message.getPayload();
         log.info("Received shipment business event on channel 'shipment-events': {}", rawJson);
 
+        BackpressureController bp = getBackpressureController();
+        if (backpressureEnabled && bp != null) {
+            if (!bp.tryAcquire()) {
+                log.warn("PB-056 [CONSUMER_BACKPRESSURE] ShipmentNotificationConsumer saturated (in-flight={}/{}). Nacking message to preserve in broker partition.",
+                        bp.getInFlightCount(), bp.getConfig().getMaxConcurrency());
+                return message.nack(new BackpressureExecutionException(
+                        "ShipmentNotificationConsumer backpressure saturated", bp.getState(), bp.getInFlightCount(), bp.getConfig().getMaxConcurrency()
+                ));
+            }
+
+            // Apply pacing delay if downstream is throttled
+            bp.applyPacingDelayIfThrottled();
+        }
+
+        long startTime = System.currentTimeMillis();
+        boolean success = false;
         try {
             processEvent(rawJson);
+            success = true;
             return message.ack();
         } catch (Exception e) {
             log.error("Failed to process shipment notification event, nacking: {}", e.getMessage(), e);
             return message.nack(e);
+        } finally {
+            if (backpressureEnabled && bp != null) {
+                long duration = System.currentTimeMillis() - startTime;
+                bp.recordExecution(duration, success);
+            }
         }
     }
 

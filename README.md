@@ -3184,6 +3184,412 @@ notification.retry.batch-size=${NOTIFICATION_RETRY_BATCH_SIZE:20}
 
 ---
 
+## Task PB-052: Retry và Exponential Backoff (Cơ chế Retry và Giãn Cách Lũy Thừa)
+
+Hệ thống Logistics Platform triển khai cơ chế **Retry & Exponential Backoff** tập trung tại thư viện dùng chung `common-lib` (`com.logistics.common.retry`), tái sử dụng thống nhất trên toàn bộ các microservices (`order-service`, `shipment-service`, `notification-service`). Cơ chế này tự động retry các tác vụ xử lý message hoặc gọi downstream service thất bại do lỗi tạm thời theo policy xác định, triệt tiêu nguy cơ retry bão hòa (thundering herd) và bảo vệ downstream khỏi quá tải.
+
+### 1. Phân Loại Lỗi (Error Classification Matrix)
+
+Hệ thống phân tách nghiêm ngặt giữa lỗi có thể retry (`Retryable`) và lỗi vĩnh viễn/lỗi nghiệp vụ (`Non-retryable`) thông qua `ErrorClassifier`:
+
+| Loại Lỗi | Mã / Exception Đại Diện | Hành Vi Retry | Lý Do Kỹ Thuật |
+|---|---|:---:|---|
+| **Network & I/O Blips** | `ConnectException`, `SocketTimeoutException`, `HttpTimeoutException`, `UnknownHostException`, `IOException` | ✅ **Retry** | Sự cố mạng tạm thời, ngắt kết nối socket, DNS resolve chậm có khả năng tự phục hồi. |
+| **HTTP Transient Server Errors** | `HTTP 408` (Request Timeout)<br>`HTTP 429` (Too Many Requests)<br>`HTTP 500` (Internal Error)<br>`HTTP 502` (Bad Gateway)<br>`HTTP 503` (Service Unavailable)<br>`HTTP 504` (Gateway Timeout) | ✅ **Retry** | Downstream service quá tải tạm thời hoặc gặp sự cố trung gian, cần thời gian để giãn cách phục hồi. |
+| **Database & Concurrency Locks** | `PessimisticLockException`, `LockTimeoutException`, `CannotAcquireLockException`, `SQLTransientException` | ✅ **Retry** | Xung đột khóa row hoặc tranh chấp transaction tức thời sẽ hết khi transaction đối thủ commit. |
+| **Client & Business Errors** | `HTTP 400` (Bad Request)<br>`HTTP 401` (Unauthorized)<br>`HTTP 403` (Forbidden)<br>`HTTP 404` (Not Found)<br>`HTTP 409` (Conflict)<br>`HTTP 422` (Unprocessable Entity) | ❌ **Không Retry** | Lỗi do client gửi payload sai cú pháp, thiếu quyền hoặc vi phạm quy tắc nghiệp vụ. Retry lại sẽ không bao giờ thành công. |
+| **Validation & Schema Defects** | `IllegalArgumentException`, `NullPointerException`, `JsonProcessingException`, `InvalidEventPayloadException`, `ValidationException` | ❌ **Không Retry** | Lỗi cấu trúc mã nguồn, định dạng JSON sai hoặc vi phạm ràng buộc dữ liệu. Fails fast ngay lập tức. |
+
+### 2. Thuật Toán Exponential Backoff & Jitter
+
+Khoảng thời gian chờ giữa các lần retry được tính toán theo công thức:
+
+$$\text{delay} = \min\Big(\text{maxBackoff}, \text{initialBackoff} \times \text{multiplier}^{\text{attempt} - 1}\Big)$$
+
+- **Randomized Jitter**: Áp dụng hệ số dao động ngẫu nhiên $\pm \text{jitterFactor}$ (mặc định 20%):
+  $$\text{jitteredDelay} = \text{delay} \times \big(1 - \text{jitterFactor} + 2 \times \text{random} \times \text{jitterFactor}\big)$$
+  Ngăn chặn hiện tượng hàng loạt request retry đồng loạt cùng lúc gây nghẽn cổ chai (thundering herd problem).
+- **Tôn trọng Header `Retry-After`**: Khi downstream trả về header `Retry-After` (thường kèm HTTP 429 hoặc 503), hệ thống ưu tiên sử dụng thời gian giãn cách do downstream chỉ định:
+  $$\text{effectiveDelay} = \min\big(\text{maxBackoff}, \max(\text{jitteredDelay}, \text{retryAfter})\big)$$
+
+### 3. Non-Blocking & Bảo Toàn Tài Nguyên Thread / Connection
+
+- Đối với các thao tác Asynchronous HTTP / CompletableFuture, `RetryExecutor.executeAsync()` lập lịch retry thông qua `ScheduledExecutorService` thay vì gọi `Thread.sleep()`. Luồng xử lý và kết nối mạng được giải phóng ngay lập tức trong suốt thời gian chờ backoff.
+- Đối với Outbox Publisher (`order-service`, `shipment-service`) và `NotificationRetryService`: Scheduler định kỳ kiểm tra `event.getOccurredAt() + requiredBackoff <= now`. Các event chưa hết thời gian giãn cách lũy thừa sẽ được bỏ qua mà không chiếm giữ thread hay khóa database.
+
+### 4. Idempotency & Tích Hợp Dead Letter Queue (DLQ PB-053)
+
+- **Ngăn Chặn Side Effect Trùng Lặp**: Toàn bộ thao tác có side effect (tạo đơn, gán tài xế, gửi thông báo) đều được bảo vệ bởi **Inbox Pattern** (`inbox_events`). Khi Kafka redeliver message hoặc retry service resubmit request với cùng một `eventId` / `X-Idempotency-Key`, hệ thống phát hiện trùng lặp và bỏ qua an toàn, đảm bảo không tạo bản ghi dư thừa.
+- **Phối hợp Failure Policy & DLQ**: Khi số lần retry vượt ngưỡng `maxRetries`, event/record được chuyển sang trạng thái thất bại vĩnh viễn (`FAILED` / `PERMANENTLY_FAILED`) và quăng ngoại lệ `RetryExhaustedException`, sẵn sàng cho cơ chế chuyển tiếp sang Dead Letter Queue (PB-053) thay vì retry vô tận.
+
+### 5. Cấu Hình Retry (Configuration Reference)
+
+| Tham Số Cấu Hình | Mặc Định | Mô Tả |
+|---|---|---|
+| `notification.platform.max-retries` | `3` | Số lần retry tối đa khi gọi Notification Platform |
+| `notification.platform.retry-delay-ms` | `500` | Thời gian backoff khởi điểm (ms) |
+| `notification.platform.max-backoff-ms` | `10000` | Giới hạn thời gian chờ tối đa (10s) |
+| `notification.platform.backoff-multiplier` | `2.0` | Hệ số nhân lũy thừa |
+| `notification.platform.jitter-factor` | `0.2` | Biên độ dao động ngẫu nhiên (±20%) |
+| `notification.retry.max-attempts` | `5` | Số lần retry tối đa của Notification Retry Worker |
+| `notification.retry.initial-backoff-ms` | `1000` | Backoff khởi điểm cho Retry Worker |
+| `notification.retry.max-backoff-ms` | `60000` | Giới hạn backoff tối đa cho Retry Worker (60s) |
+| `outbox.publisher.initial-backoff-ms` | `1000` | Backoff khởi điểm cho Outbox Publisher |
+| `outbox.publisher.max-backoff-ms` | `30000` | Giới hạn backoff tối đa cho Outbox Publisher (30s) |
+| `outbox.publisher.backoff-multiplier` | `2.0` | Hệ số nhân backoff của Outbox Publisher |
+| `logistics.map.max-retries` | `2` | Số lần retry tối đa khi gọi Map Service |
+
+---
+
+## Task PB-053: Dead Letter Queue (DLQ - Hàng Đợi Thư Chết & Replay Message)
+
+Khi các message trên Kafka broker gặp lỗi poison pill (dữ liệu sai định dạng JSON, thiếu trường bắt buộc, vi phạm validation nghiệp vụ không thể tự sửa) hoặc đã vượt quá số lần retry tối đa theo chính sách lũy thừa (PB-052 `RetryExhaustedException`), hệ thống sẽ tự động cách ly và chuyển tiếp message vào **Dead Letter Queue (DLQ)**. Giải pháp này ngăn chặn hiện tượng tắc nghẽn partition (topic stall), triệt tiêu vòng lặp retry vô tận, đồng thời bảo toàn toàn bộ dữ liệu phục vụ điều tra nguyên nhân gốc rễ và hỗ trợ replay có kiểm soát.
+
+### 1. Kiến Trúc DLQ & Broker Semantics (Apache Kafka KRaft)
+
+Hệ thống tận dụng trực tiếp hạ tầng Kafka 3.8 KRaft hiện có mà không phát sinh thêm broker hay engine queue ngoài luồng:
+- **DLQ Naming Convention**: Mỗi topic nghiệp vụ có một DLQ topic tương ứng theo chuẩn `<original_topic>.dlq`:
+  - `logistics.order.events` → `logistics.order.events.dlq`
+  - `logistics.shipment.events` → `logistics.shipment.events.dlq`
+  - `logistics.notification.events` → `logistics.notification.events.dlq`
+- **Nguyên Tắc Xác Nhận Broker (No Message Loss Guarantee)**:
+  - Consumer **tuyệt đối không ACK** message gốc trước khi broker xác nhận đã nhận và ghi thành công message vào DLQ.
+  - Quy trình xử lý bất đồng bộ:
+    1. Khi phát sinh lỗi không thể retry / retry exhausted, gọi `deadLetterQueueService.sendToDlq(...)`.
+    2. Service thực hiện ghi nhận audit vào database (`dead_letter_messages`) và emit `DeadLetterEnvelope` lên Kafka topic DLQ.
+    3. **Chỉ khi Kafka broker xác nhận (Broker Acknowledged DLQ Publish)**: Consumer mới gọi `message.ack()`. Việc này commit consumer offset của message lỗi, unblock partition và chấm dứt vòng lặp poison pill.
+    4. **Nếu gửi vào DLQ thất bại**: Consumer gọi `message.nack(dlqErr)`, không commit offset để Kafka tiếp tục bảo toàn message, ngăn chặn triệt để nguy cơ mất dữ liệu.
+
+### 2. Forensic Metadata Envelope & Bảo Mật Dữ Liệu (Sanitization)
+
+- **`DeadLetterEnvelope<T>`**: Đóng gói toàn bộ thông tin điều tra kỹ thuật:
+  - `deadLetterId`: Định danh duy nhất của bản ghi DLQ (UUID).
+  - `originalMessageId`: `eventId` gốc từ DomainEvent envelope.
+  - `originalTopic`: Tên topic gốc phát sinh lỗi.
+  - `eventType`: Loại sự kiện nghiệp vụ (`ORDER_CREATED`, `DRIVER_ASSIGNED`, hoặc `MALFORMED_JSON`).
+  - `aggregateId`: Khóa phân vùng / Aggregate Root ID (`orderId`, `shipmentId`).
+  - `payload`: Toàn bộ nội dung dữ liệu gốc của message đã qua làm sạch.
+  - `exceptionClass`: Tên lớp ngoại lệ gây lỗi (`InvalidEventPayloadException`, `RetryExhaustedException`, v.v.).
+  - `errorMessage`: Thông điệp lỗi chi tiết đã được làm sạch.
+  - `attempts`: Số lần đã cố gắng xử lý trước khi bị cách ly vào DLQ.
+  - `failedAt`: Dấu thời gian ghi nhận sự cố (ISO-8601 UTC).
+  - `status`: Trạng thái xử lý (`PENDING_INSPECTION`, `REPLAYED`, `DISCARDED`).
+- **Làm Sạch Dữ Liệu Nhạy Cảm (`DeadLetterSanitizer`)**:
+  - Tự động quét và mask toàn bộ mật khẩu, mã bí mật, Bearer token, JWT token, API key (`password`, `token`, `secret`, `apiKey`, `authorization`, `Bearer ...`) thành `[REDACTED]` trước khi lưu trữ vào database hoặc gửi lên topic DLQ.
+  - Bảo vệ an toàn tuyệt đối, không làm lộ credentials trong file log hay công cụ giám sát tập trung.
+
+### 3. Bảng Dữ Liệu & Liquibase Migration
+
+Migration `015-create-dead-letter-messages-table.yaml` khởi tạo bảng `dead_letter_messages` với đầy đủ chỉ mục phục vụ truy vấn vận hành:
+- Các trường: `id`, `original_message_id`, `original_topic`, `original_partition`, `original_offset`, `event_type`, `aggregate_id`, `payload`, `exception_class`, `error_message`, `retry_count`, `status`, `replayed_at`, `replayed_by`, `discarded_at`, `discard_reason`, `failed_at`, `created_at`.
+- Chỉ mục: `idx_dlq_status`, `idx_dlq_original_topic`, `idx_dlq_failed_at`, `idx_dlq_original_msg_id`.
+
+### 4. REST API Quản Trị, Quan Sát & Replay Message
+
+Hệ thống cung cấp bộ REST API tại `/api/shipments/dlq` và `/shipments/dlq`:
+
+| Phương Thức | Endpoint | Mô Tả |
+|---|---|---|
+| `GET` | `/api/shipments/dlq` | Lấy danh sách message trong DLQ (hỗ trợ lọc theo `status`, `topic`, phân trang `page`, `size`) |
+| `GET` | `/api/shipments/dlq/metrics` | Lấy chỉ số tổng hợp: `totalPending`, `totalReplayed`, `totalDiscarded`, `totalMessages` |
+| `GET` | `/api/shipments/dlq/{id}` | Xem chi tiết forensic metadata và sanitized payload của message theo ID |
+| `POST` | `/api/shipments/dlq/{id}/replay` | Kích hoạt replay message có kiểm soát (kèm header `X-User-Id` để audit) |
+| `POST` | `/api/shipments/dlq/{id}/discard` | Đánh dấu loại bỏ message (`DISCARDED`) kèm lý do giải trình qua param `reason` |
+
+### 5. Cơ Chế Replay Đảm Bảo Tính Idempotent (Idempotent Replay via Inbox Pattern)
+
+- Khi kỹ sư vận hành điều tra và khắc phục xong sự cố (ví dụ fix lỗi schema hoặc khôi phục dịch vụ phụ thuộc), thao tác `replayMessage` sẽ nạp lại payload của message vào pipeline consumer.
+- **Bảo Vệ Bởi Inbox Pattern**: Nhờ có lớp bảo vệ của `InboxEventService` (`inbox_events`), nếu sự kiện đó đã từng được xử lý một phần hoặc đã hoàn thành, Inbox Pattern sẽ phát hiện sự kiện đã tồn tại, trả về kết quả hiện tại mà **không thực hiện lại side effect** (không tạo trùng Order, không tạo trùng Assignment, không bắn lặp Notification).
+- Khi replay thành công, trạng thái DLQ được chuyển sang `REPLAYED`, ghi nhận dấu thời gian và người thực hiện replay.
+
+---
+
+## Task PB-054: Circuit Breaker (Cơ Chế Ngắt Mạch Bảo Vệ Tài Nguyên)
+
+Hạn chế các lời gọi liên tục tới các dependency bên ngoài (Notification Platform API, Google Maps / OpenStreetMap Routing API) khi chúng đang gặp sự cố nghiêm trọng, ngăn ngừa tình trạng cạn kiệt thread pool, connection pool và tài nguyên của hệ thống Logistics.
+
+### 1. Kiến Trúc Circuit Breaker & Tiêu Chuẩn MicroProfile Fault Tolerance
+
+Hệ thống triển khai chuẩn hóa dựa trên hợp đồng `org.eclipse.microprofile.fault-tolerance` (`CircuitBreakerState`, `CircuitBreakerOpenException`):
+- **3 Trạng thái chuẩn (State Machine)**:
+  - `CLOSED`: Trạng thái bình thường. Mọi request được chuyển tiếp tới dependency. Nếu số lần lỗi liên tiếp chạm ngưỡng `failureThreshold`, circuit lập tức chuyển sang `OPEN`.
+  - `OPEN`: Mạch ngắt hoàn toàn. Mọi request bị short-circuit lập tức mà không gửi request mạng (trả về kết quả `circuitOpen` hoặc kích hoạt fallback), bảo toàn tuyệt đối thread/connection.
+  - `HALF_OPEN`: Sau khi hết thời gian chờ `openDuration` (mặc định 10s - 15s), circuit chuyển sang trạng thái thăm dò. Hệ thống chỉ cho phép số lượng lời gọi thử nghiệm giới hạn (`trialCalls` = 1) đi qua để kiểm tra sức khỏe dependency:
+    - Nếu lời gọi probe thành công: Tích lũy số lần thành công. Khi đạt `successThreshold` (mặc định 2), circuit phục hồi về `CLOSED`.
+    - Nếu lời gọi probe thất bại: Ngay lập tức trip ngược trở lại `OPEN` và reset đồng hồ chờ `openDuration`.
+
+### 2. Phân Biệt Lỗi Hạ Tầng & Lỗi Nghiệp Vụ (`ErrorClassifier`)
+
+Cơ chế ngắt mạch chỉ được kích hoạt bởi các lỗi gián đoạn hạ tầng mạng và sự cố phía dependency, **tuyệt đối không bị ảnh hưởng bởi lỗi nghiệp vụ hoặc dữ liệu request**:
+- **Lỗi làm tăng Failure Count**: Lỗi timeout mạng (`TimeoutException`, `HttpTimeoutException`), lỗi kết nối (`ConnectException`, `UnknownHostException`), HTTP status `500 Internal Server Error`, `502 Bad Gateway`, `503 Service Unavailable`, `504 Gateway Timeout`.
+- **Lỗi KHÔNG làm mở Circuit**: Các lỗi HTTP 4xx phía client/nghiệp vụ (`400 Bad Request`, `401 Unauthorized`, `403 Forbidden`, `404 Not Found`, `422 Unprocessable Entity`), lỗi validation dữ liệu. Các lỗi này phản ánh dữ liệu request không hợp lệ của từng giao dịch cụ thể chứ không phản ánh downstream service bị sập.
+
+### 3. Phối Hợp Đa Tầng: Circuit Breaker (PB-054) & Retry Exponential Backoff (PB-052)
+
+Sự kết hợp chặt chẽ giữa PB-052 và PB-054 ngăn chặn bão tải (retry storm):
+- **Khi Circuit CLOSED**: Lời gọi HTTP áp dụng retry với exponential backoff & jitter (PB-052) cho những chập chờn tạm thời cực ngắn (transient blips).
+- **Khi Circuit OPEN**:
+  - `DefaultNotificationPlatformClient` và `GenericRestMapProviderClient` short-circuit ngay lập tức, **bỏ qua toàn bộ chu kỳ retry**, trả về kết quả lỗi circuit open ngay tức khắc.
+  - `NotificationRetryService`: Trước khi quét batch trong database, kiểm tra trạng thái circuit breaker của `notification-platform`. Nếu circuit đang `OPEN`, retry worker lập tức bỏ qua chu kỳ chạy (skip execution), không tiêu tốn thread và không thực hiện hàng loạt câu lệnh HTTP vô ích.
+- **Khi Circuit HALF_OPEN**: Client chỉ thực hiện đúng **1 probe call duy nhất**, không cho phép retry nhiều lần lặp lại trong pha thăm dò, đảm bảo không gây tải đột ngột lên dependency vừa mới hồi phục.
+
+### 4. Chính Sách Fallback & Bảo Toàn Tính Nhất Quán Nghiệp Vụ (Zero Silent Loss)
+
+Ngắt mạch không đồng nghĩa với làm mất dữ liệu của khách hàng hay làm hỏng tính nhất quán:
+- **Notification Service Fallback Policy**:
+  - Khi circuit OPEN, `ShipmentNotificationConsumer` lưu bản ghi thông báo vào database với trạng thái `FAILED` kèm thông điệp rõ ràng: `"Notification platform circuit breaker is OPEN"`.
+  - Consumer thực hiện ACK Kafka message để unblock partition, không gây nghẽn luồng xử lý sự kiện.
+  - Khi dependency Notification Platform khỏe lại và circuit chuyển về `CLOSED`, tiến trình ngầm `NotificationRetryService` sẽ tự động quét các bản ghi này và gửi bù thành công.
+- **Shipment / Map Provider Fallback Policy**:
+  - Khi circuit OPEN với external REST Map Provider, `GenericRestMapProviderClient` tự động fallback sang `MockMapProviderClient` (thuật toán Haversine nội bộ).
+  - Nghiệp vụ phân công tài xế (`Driver Assignment`), tính toán khoảng cách và trạng thái đơn hàng vẫn hoạt động thông suốt với độ sẵn sàng cao (High Availability), tính nhất quán của Order được bảo toàn tuyệt đối.
+
+### 5. Cấu Hình Linh Hoạt (`application.properties`)
+
+Dễ dàng điều chỉnh thông số cho từng service:
+
+```properties
+# Notification Service Circuit Breaker
+notification.circuit-breaker.enabled=true
+notification.circuit-breaker.failure-threshold=3
+notification.circuit-breaker.open-duration-ms=10000
+notification.circuit-breaker.success-threshold=2
+
+# Shipment Map Provider Circuit Breaker
+logistics.map.circuit-breaker.enabled=true
+logistics.map.circuit-breaker.failure-threshold=3
+logistics.map.circuit-breaker.open-duration-ms=10000
+logistics.map.circuit-breaker.success-threshold=2
+logistics.map.circuit-breaker.fallback-enabled=true
+```
+
+### 6. REST API Quản Trị & Giám Sát Telemetry
+
+Cung cấp các REST endpoint tại `/api/notifications/circuit-breaker` và `/api/shipments/circuit-breaker`:
+
+| Phương Thức | Endpoint | Mô Tả |
+|---|---|---|
+| `GET` | `/api/notifications/circuit-breaker` | Xem trạng thái mạch (`CLOSED`, `OPEN`, `HALF_OPEN`), số lần thất bại, số lần mở mạch, tổng số cuộc gọi |
+| `POST` | `/api/notifications/circuit-breaker/reset` | Thao tác can thiệp vận hành (Ops): ép đặt lại mạch về trạng thái `CLOSED` và reset bộ đếm |
+| `GET` | `/api/shipments/circuit-breaker` | Xem trạng thái circuit breaker của Map Provider client |
+| `POST` | `/api/shipments/circuit-breaker/reset` | Đặt lại mạch Map Provider về `CLOSED` |
+
+---
+
+## Task PB-055: Rate Limiting (Giới Hạn Tốc Độ & Điều Tiết Lưu Lượng)
+
+Hệ thống Logistics Platform triển khai cơ chế **Rate Limiting** toàn diện nhằm kiểm soát tốc độ request inbound từ client bên ngoài tại API Gateway, đồng thời điều tiết throughput xử lý outbound/event tới các dependency, ngăn ngừa bão lưu lượng và hiện tượng cạn kiệt tài nguyên.
+
+### 1. Kiến Trúc Rate Limiting Hai Tầng (Two-Tier Architecture)
+
+1. **Inbound HTTP Rate Limiting tại API Gateway (Chốt chặn cửa ngõ)**:
+   - Được triển khai bằng Vert.x Route Handler (`GatewayRateLimitHandler`, order: `-100`), đón đầu toàn bộ traffic trước khi chuyển tiếp tới các backend microservice (`user-service`, `order-service`, `shipment-service`, `notification-service`).
+   - Loại bỏ nhu cầu cài đặt các bộ lọc rate limit trùng lặp tại từng service nội bộ.
+2. **Event & Outbound Processing Rate Limiting (`EventRateLimiter`)**:
+   - Áp dụng thuật toán Token Bucket điều tiết lưu lượng gọi downstream (ví dụ cuộc gọi tới Notification Platform từ `DefaultNotificationPlatformClient`).
+   - **Cam kết không drop event**: Khi throughput chạm ngưỡng tối đa, worker tự động giảm tốc độ/chờ cấp quota mà **tuyệt đối không loại bỏ hoặc đánh mất message**.
+
+### 2. Chính Sách Phân Cấp Theo Endpoint (Tiered Policies)
+
+Hệ thống không áp dụng một ngưỡng cào bằng mà phân loại theo đặc thù an toàn và tần suất sử dụng:
+
+| Chính Sách | Endpoint Áp Dụng | Giới Hạn Mặc Định | Cơ Chế Định Danh (Key Scope) | Mục Đích Kỹ Thuật |
+|---|---|:---:|:---:|---|
+| **`auth`** | `/api/auth/*`, `/auth/*` | **10 req / 60s** | `IP_ONLY` | Ngăn chặn tấn công Brute-force đăng nhập, dò mật khẩu và spam đăng ký tài khoản. |
+| **`orders`** | `/api/orders*` | **30 req / 60s** | `IP_AND_USER` | Giới hạn tạo đơn hàng ảo và thao tác cập nhật vòng đời đơn liên tục. |
+| **`tracking`** | `/api/shipments/tracking*`<br>`/api/shipments/dashboard*` | **120 req / 60s** | `IP_AND_USER` | Cho phép các tác vụ polling thời gian thực vị trí tài xế GPS và dashboard vận hành. |
+| **`default`** | Mọi API endpoint khác | **60 req / 60s** | `IP_AND_USER` | Bảo vệ các tài nguyên danh mục, profile và dữ liệu hệ thống thông thường. |
+
+### 3. Lưu Trữ Trạng Thái Phân Tán (Redis 7) & Fallback Bộ Nhớ
+
+- **Phân tán qua Redis 7 (`RedisRateLimiterStorage`)**:
+  - Tận dụng container Redis 7 có sẵn (`logistics-redis`, port 6379).
+  - Sử dụng kịch bản Lua Script nguyên tử (`EVAL` atomic `INCR` + `EXPIRE` + `TTL`), đảm bảo **tính nhất quán tuyệt đối giữa nhiều replica API Gateway** phía sau bộ cân bằng tải.
+- **Bộ nhớ cục bộ (`InMemoryRateLimiterStorage`)**:
+  - Triển khai thuật toán Sliding Window Deque với độ chính xác cao, loại bỏ hoàn toàn hiện tượng bùng nổ lưu lượng ở ranh giới cửa sổ (boundary burst).
+  - Hoạt động độc lập không phụ thuộc hạ tầng ngoài, phục vụ môi trường standalone, unit tests hoặc làm fallback.
+
+### 4. Xử Lý Sự Cố Hạ Tầng (`FailPolicy`)
+
+Khi cụm Redis gặp sự cố mạng hoặc timeout, hệ thống áp dụng chiến lược chuyển đổi dự phòng linh hoạt:
+- **`FAIL_OPEN` (Mặc định - Ưu tiên High Availability)**: Tự động ghi nhận log cảnh báo `PB-055 [REDIS_STORAGE_ERROR]`, chuyển sang sử dụng `InMemoryRateLimiterStorage` làm fallback cục bộ; nếu không có fallback, cho phép request đi tiếp để đảm bảo trải nghiệm khách hàng không bị gián đoạn.
+- **`FAIL_CLOSED` (Ưu tiên High Security)**: Lập tức từ chối request với mã lỗi 429/503 để bảo vệ hệ thống tuyệt đối khi mất khả năng kiểm soát lưu lượng.
+
+### 5. Nhận Diện Danh Tính & Chống Vượt Ngưỡng (Anti-Bypass)
+
+Khóa rate limit được tổng hợp chặt chẽ để ngăn chặn tình trạng gửi request song song hoặc tráo đổi IP:
+- **Client có xác thực (Authenticated)**: Trích xuất `userId` từ JWT Bearer token hoặc header `X-User-Id` $\rightarrow$ Khóa định danh `user:<userId>`. Dù người dùng có sử dụng nhiều proxy/IP khác nhau, hạn mức tài khoản vẫn được kiểm soát thống nhất.
+- **Client ẩn danh (Anonymous)**: Trích xuất IP thực qua header `X-Forwarded-For` (lấy IP đầu tiên ngoài cùng), `X-Real-IP`, hoặc remote address $\rightarrow$ Khóa định danh `ip:<clientIp>`.
+- **Thao tác Atomic**: Các thao tác tăng biến đếm được thực hiện nguyên tử (Atomic Lock-free / Lua Script), ngăn ngừa race condition khi hàng chục request đồng thời gửi tới cùng microsecond.
+
+### 6. Chuẩn Hóa Phản Hồi HTTP 429 & Headers RFC 6585
+
+Khi một request vượt quá hạn ngạch, API Gateway chặn đứng request ngay lập tức và trả về:
+- **Mã HTTP**: `429 Too Many Requests`.
+- **Headers**:
+  - `Retry-After`: Số giây client cần đợi trước khi thử lại (tương thích hoàn hảo với cơ chế retry PB-052).
+  - `X-RateLimit-Limit`: Hạn mức tối đa của policy trong cửa sổ thời gian.
+  - `X-RateLimit-Remaining`: Số lượng request còn lại cho phép trong cửa sổ hiện tại (bằng `0` khi bị chặn).
+  - `X-RateLimit-Reset`: Thời điểm epoch second khi cửa sổ rate limit được tái lập.
+- **Body JSON Envelope**:
+  ```json
+  {
+    "success": false,
+    "message": "Rate limit exceeded. Please retry after 45 seconds.",
+    "data": {
+      "policy": "auth",
+      "limit": 10,
+      "retryAfterSeconds": 45,
+      "resetEpochSeconds": 1793522100
+    }
+  }
+  ```
+
+### 7. Cấu Hình Linh Hoạt (`application.properties`)
+
+```properties
+# Gateway Rate Limiting Configuration
+gateway.rate-limit.enabled=true
+gateway.rate-limit.storage=in-memory
+gateway.rate-limit.fail-policy=FAIL_OPEN
+gateway.rate-limit.redis.host=${REDIS_HOST:localhost}
+gateway.rate-limit.redis.port=${REDIS_PORT:6379}
+gateway.rate-limit.redis.timeout-ms=2000
+
+# Tiered Policy Thresholds
+gateway.rate-limit.policies.auth.limit=10
+gateway.rate-limit.policies.auth.window-seconds=60
+
+gateway.rate-limit.policies.orders.limit=30
+gateway.rate-limit.policies.orders.window-seconds=60
+
+gateway.rate-limit.policies.tracking.limit=120
+gateway.rate-limit.policies.tracking.window-seconds=60
+
+gateway.rate-limit.policies.default.limit=60
+gateway.rate-limit.policies.default.window-seconds=60
+
+# Downstream Event Processing Rate Limiter (Notification Service)
+notification.rate-limit.enabled=true
+notification.rate-limit.permits-per-second=50.0
+notification.rate-limit.burst-capacity=50.0
+```
+
+### 8. REST API Quản Trị & Giám Sát Telemetry
+
+Cung cấp các REST endpoint tại API Gateway:
+
+| Phương Thức | Endpoint | Mô Tả |
+|---|---|---|
+| `GET` | `/api/gateway/rate-limit/metrics` | Lấy telemetry tổng hợp: `totalRequests`, `allowedRequests`, `rejectedRequests`, `storageErrors`, và phân tích theo từng policy |
+| `POST` | `/api/gateway/rate-limit/reset` | Thao tác Ops: Xóa trắng toàn bộ bộ đếm rate limit và khởi tạo lại trạng thái sạch |
+| `GET` | `/api/gateway/rate-limit/policies` | Xem danh sách policy đang kích hoạt và các thông số ngưỡng cấu hình |
+
+---
+
+## Task PB-056: Backpressure (Cơ Chế Tự Giảm Tốc & Điều Tiết Áp Lực Tải)
+
+Hệ thống Logistics Platform triển khai cơ chế **Backpressure thích ứng (Adaptive Backpressure)** nhằm bảo vệ hệ thống khỏi hiện tượng sụp đổ dây chuyền (cascading failure). Khi các thành phần downstream (cơ sở dữ liệu, Kafka consumer, Notification Platform API) bị chậm hoặc nghẽn, hệ thống tự động hãm tốc độ tiếp nhận và giảm throughput thay vì tích lũy công việc không giới hạn vào bộ nhớ gây lỗi tràn bộ nhớ (OutOfMemoryError).
+
+### 1. Máy Trạng Thái Backpressure (Adaptive State Machine)
+
+Bộ điều khiển `BackpressureController` liên tục theo dõi tải tức thời qua hai chỉ số cốt lõi:
+- **Số tác vụ đang xử lý đồng thời (`currentInFlight`)**: So với trần năng lực `maxConcurrency`.
+- **Độ trễ trung bình trượt có trọng số thời gian (`EWMA Latency`)**: $\text{EWMA} = \alpha \times \text{sample} + (1 - \alpha) \times \text{previous}$.
+
+```mermaid
+stateDiagram-v2
+    [*] --> NORMAL
+    NORMAL --> THROTTLED: inFlight >= warningConcurrency HOẶC avgLatency >= highLatencyThreshold (1000ms)
+    THROTTLED --> SHEDDING: inFlight >= maxConcurrency
+    SHEDDING --> THROTTLED: inFlight giảm xuống dưới maxConcurrency
+    THROTTLED --> NORMAL: avgLatency <= recoveryLatency (300ms) VÀ inFlight < warningConcurrency
+```
+
+- **`NORMAL`**: Downstream khỏe mạnh, hệ thống vận hành ở tốc độ tối đa, không có độ trễ giãn cách (zero pacing delay).
+- **`THROTTLED`**: Downstream bắt đầu chậm. Bộ điều khiển tự động chèn thêm độ trễ giãn cách thích ứng (`pacing delay` từ 20ms đến 200ms) giữa các lần tiếp nhận tác vụ để giảm tốc độ nạp dữ liệu.
+- **`SHEDDING`**: Concurrency chạm kịch trần `maxConcurrency`. Hệ thống từ chối nhận thêm tác vụ mới để bảo vệ an toàn tuyệt đối cho các tác vụ đang thực thi dở dang.
+
+### 2. Inbound Request Backpressure tại API Gateway
+
+- **Chặn Đứng Tắc Nghẽn Tại Cửa Ngõ (`GatewayBackpressureHandler`)**:
+  - Được cấu hình tại Vert.x Router với `order: -90`, chạy ngay sau Rate Limiting (`-100`) và trước bộ định tuyến chuyển tiếp.
+  - Theo dõi số lượng HTTP request in-flight đồng thời tới tất cả các backend microservice.
+  - Khi backend services bị treo hoặc chậm chạm ngưỡng `maxConcurrency` (mặc định 50):
+    - Trả về mã lỗi **`HTTP 503 Service Unavailable`** (hoặc `429`) kèm header `Retry-After: 5`.
+    - Phản hồi JSON giải trình rõ ràng:
+      ```json
+      {
+        "success": false,
+        "message": "Gateway backpressure activated: downstream services are congested. Please retry shortly.",
+        "data": {
+          "state": "SHEDDING",
+          "inFlight": 50,
+          "maxConcurrency": 50,
+          "retryAfterSeconds": 5
+        }
+      }
+      ```
+  - **Bảo Toàn Permit (No Leak Guarantee)**: Sử dụng `ctx.addEndHandler(...)` để đảm bảo permit concurrency luôn luôn được giải phóng và ghi nhận độ trễ chính xác bất kể request thành công hay thất bại.
+
+### 3. Điều Tiết Consumer Message Broker Không Mất Dữ Liệu
+
+- **Ngăn Chặn Tràn Bộ Nhớ Heap Tại Consumer (`ShipmentNotificationConsumer`)**:
+  - Giới hạn số message Kafka xử lý song song (`notification.consumer.backpressure.max-concurrency = 10`).
+  - Khi downstream chậm hoặc treo:
+    - Nếu trạng thái là `THROTTLED`: Tự động áp dụng `applyPacingDelayIfThrottled()`, kéo dài thời gian giữa các message để downstream giải tỏa backlog.
+    - Nếu trạng thái chạm trần `SHEDDING`: Consumer gọi `message.nack(...)` với ngoại lệ `BackpressureExecutionException`.
+  - **Cam Kết Không Mất Dữ Liệu (Zero Message Loss)**: Vì consumer **tuyệt đối không gọi `message.ack()`**, Kafka broker không commit offset và tiếp tục lưu trữ an toàn message trên đĩa phân vùng (partition log). Message sẽ được redeliver khi áp lực tải giảm bớt.
+
+### 4. Điều Chỉnh Batch Thích Ứng Trong Background Workers (`NotificationRetryService`)
+
+- Khi tiến trình chạy ngầm `NotificationRetryService` thức dậy quét database:
+  - Kiểm tra trạng thái backpressure của consumer thông qua `BackpressureRegistry`.
+  - **Khi SHEDDING**: Bỏ qua toàn bộ chu kỳ retry (`PB-056 [RETRY_BACKPRESSURE_SKIP]`), không dồn thêm gánh nặng cho downstream đang quá tải.
+  - **Khi THROTTLED**: Chèn pacing delay giữa các bản ghi retry để phân tán tải đều đặn.
+
+### 5. Phối Hợp Đồng Bộ Đa Tầng Resilience
+
+| Tầng Cơ Chế | Vai Trò & Phối Hợp |
+|---|---|
+| **Rate Limiting (PB-055)** | Giới hạn số lượng request theo thời gian (e.g. 60 req/phút). |
+| **Backpressure (PB-056)** | Hãm phanh tức thời dựa trên năng lực downstream (concurrency in-flight & processing latency). Ngay cả khi chưa hết quota rate limit, nếu DB bị chậm thì Backpressure vẫn tự động giảm tốc. |
+| **Retry & Exponential Backoff (PB-052)** | Giãn cách thử lại lũy thừa, tạm hoãn retry khi backpressure đang tắc nghẽn. |
+| **Circuit Breaker (PB-054)** | Ngắt mạch hoàn toàn (`OPEN`) nếu downstream gặp lỗi kéo dài, giải phóng ngay lập tức các luồng chờ. |
+| **Dead Letter Queue (PB-053)** | Cách ly các message poison pill không thể sửa chữa, giữ sạch đường ống xử lý. |
+
+### 6. Cấu Hình Linh Hoạt (`application.properties`)
+
+```properties
+# Gateway Inbound Backpressure Configuration
+gateway.backpressure.enabled=true
+gateway.backpressure.max-concurrency=50
+gateway.backpressure.warning-concurrency=35
+gateway.backpressure.high-latency-ms=2000
+gateway.backpressure.recovery-latency-ms=500
+gateway.backpressure.min-pacing-delay-ms=20
+gateway.backpressure.max-pacing-delay-ms=200
+gateway.backpressure.ewma-alpha=0.2
+
+# Notification Consumer Backpressure Configuration
+notification.consumer.backpressure.enabled=true
+notification.consumer.backpressure.max-concurrency=10
+notification.consumer.backpressure.warning-concurrency=7
+notification.consumer.backpressure.high-latency-ms=1000
+notification.consumer.backpressure.recovery-latency-ms=300
+```
+
+### 7. REST API Quan Sát Telemetry & Điều Khiển
+
+Cung cấp tại API Gateway:
+
+| Phương Thức | Endpoint | Mô Tả |
+|---|---|---|
+| `GET` | `/api/gateway/backpressure/metrics` | Lấy telemetry: trạng thái (`NORMAL`, `THROTTLED`, `SHEDDING`), số request in-flight, giới hạn concurrency, độ trễ trung bình EWMA, số lần giảm tốc và số lần load shed |
+| `POST` | `/api/gateway/backpressure/reset` | Thao tác Ops: Đặt lại toàn bộ bộ đếm in-flight và đưa trạng thái về `NORMAL` |
+
+---
+
 ## Roadmap
 
 | PB Item | Scope | Status |
@@ -3239,6 +3645,11 @@ notification.retry.batch-size=${NOTIFICATION_RETRY_BATCH_SIZE:20}
 | **PB-049** | Operations Actionable Orders: Tập trung Order chưa assign & Order FAILED, bộ lọc, tìm kiếm, phân trang & reassign | ✅ Completed |
 | **PB-050** | Notification Business Events: Publish notification events (DELIVERED, FAILED, ASSIGNED) via Transactional Outbox & Idempotent Consumer | ✅ Completed |
 | **PB-051** | Notification Platform Integration: Tích hợp Logistics với Notification Platform qua REST API Ingestion contract & Retry Worker | ✅ Completed |
+| **PB-052** | Retry & Exponential Backoff: Chuẩn hóa RetryPolicy, BackoffCalculator (Jitter + Retry-After), non-blocking async, ErrorClassifier, structured logging & DLQ readiness | ✅ Completed |
+| **PB-053** | Dead Letter Queue (DLQ): Định tuyến poison/exhausted message, bảo mật sanitizer, unblock broker partition, quan sát telemetry, REST API & idempotent replay via Inbox Pattern | ✅ Completed |
+| **PB-054** | Circuit Breaker: Bảo vệ tài nguyên với 3 trạng thái CLOSED/OPEN/HALF-OPEN, phân loại transient error, short-circuit, fallback & REST observability | ✅ Completed |
+| **PB-055** | Rate Limiting: Giới hạn lưu lượng phân tầng (Inbound Gateway & Event Token Bucket), phân tán Redis 7, In-Memory sliding window, HTTP 429, Retry-After & telemetry | ✅ Completed |
+| **PB-056** | Backpressure: Tự điều tiết tốc độ với máy trạng thái NORMAL/THROTTLED/SHEDDING, bounded concurrency, EWMA latency, pacing delay, load shedding & telemetry | ✅ Completed |
 
 
 

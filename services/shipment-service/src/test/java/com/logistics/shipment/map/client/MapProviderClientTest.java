@@ -57,6 +57,7 @@ class MapProviderClientTest {
         genericRestProvider.setConfiguration(config);
         genericRestProvider.setObjectMapper(objectMapper);
         genericRestProvider.setHttpClient(mockHttpClient);
+        genericRestProvider.mockFallbackClient = mockProvider;
     }
 
     @Test
@@ -230,5 +231,94 @@ class MapProviderClientTest {
         assertThatThrownBy(() -> genericRestProvider.getDirections(req))
                 .isInstanceOf(MapConfigurationException.class)
                 .hasMessageContaining("Service URL is missing or blank");
+    }
+
+    @Test
+    @DisplayName("PB-052: GenericRestProvider retries on transient 503 and recovers upon successful retry")
+    void genericRestProvider_retriesOnTransient503_andRecovers() throws Exception {
+        config.setApiKey("valid-api-key");
+        config.setServiceUrl("http://localhost:5000");
+
+        HttpResponse<String> transient503 = mock(HttpResponse.class);
+        when(transient503.statusCode()).thenReturn(503);
+        when(transient503.body()).thenReturn("{\"error\":\"Temporary service overload\"}");
+        when(transient503.headers()).thenReturn(java.net.http.HttpHeaders.of(java.util.Map.of(), (k, v) -> true));
+
+        HttpResponse<String> successResp = mock(HttpResponse.class);
+        when(successResp.statusCode()).thenReturn(200);
+        when(successResp.body()).thenReturn("""
+                {
+                    "distanceMeters": 4200.0,
+                    "durationSeconds": 600,
+                    "geometry": "encoded-polyline-test",
+                    "steps": []
+                }
+                """);
+
+        // First attempt returns 503, second attempt succeeds with 200
+        Mockito.doReturn(transient503)
+                .doReturn(successResp)
+                .when(mockHttpClient).send(any(HttpRequest.class), any());
+
+        RouteDirectionRequest req = new RouteDirectionRequest(
+                MapCoordinatesDto.of(21.0285, 105.8542),
+                MapCoordinatesDto.of(21.0362, 105.7905)
+        );
+
+        RouteDirectionResponse response = genericRestProvider.getDirections(req);
+
+        assertThat(response).isNotNull();
+        assertThat(response.isSuccess()).isTrue();
+        assertThat(response.getDistanceMeters()).isEqualTo(4200.0);
+        assertThat(response.getDurationSeconds()).isEqualTo(600L);
+        // Verify 2 attempts were made
+        Mockito.verify(mockHttpClient, Mockito.times(2)).send(any(HttpRequest.class), any());
+    }
+
+    @Test
+    @DisplayName("PB-054: GenericRestProvider trips circuit to OPEN and uses fallback to maintain Order consistency")
+    void genericRestProvider_tripsCircuit_andUsesFallback() throws Exception {
+        config.setApiKey("valid-api-key");
+        config.setServiceUrl("http://localhost:5000");
+        config.setFallbackEnabled(true);
+
+        com.logistics.common.circuitbreaker.CircuitBreaker cb = new com.logistics.common.circuitbreaker.CircuitBreaker(
+                "map-provider-test",
+                com.logistics.common.circuitbreaker.CircuitBreakerConfig.builder()
+                        .failureThreshold(2)
+                        .openDuration(java.time.Duration.ofMillis(200))
+                        .build()
+        );
+        genericRestProvider.setCircuitBreaker(cb);
+
+        HttpResponse<String> serverErrorResp = mock(HttpResponse.class);
+        when(serverErrorResp.statusCode()).thenReturn(500);
+        when(serverErrorResp.body()).thenReturn("Internal Server Error");
+        Mockito.doReturn(serverErrorResp).when(mockHttpClient).send(any(HttpRequest.class), any());
+
+        RouteDirectionRequest req = new RouteDirectionRequest(
+                MapCoordinatesDto.of(21.0285, 105.8542),
+                MapCoordinatesDto.of(21.0362, 105.7905)
+        );
+
+        // Call 1 fails -> fallback executes
+        RouteDirectionResponse resp1 = genericRestProvider.getDirections(req);
+        assertThat(resp1.isSuccess()).isTrue();
+        assertThat(resp1.getProvider()).isEqualTo("MOCK");
+        assertThat(cb.isClosed()).isTrue();
+
+        // Call 2 fails -> reaches failureThreshold of 2 -> trips to OPEN
+        RouteDirectionResponse resp2 = genericRestProvider.getDirections(req);
+        assertThat(resp2.isSuccess()).isTrue();
+        assertThat(cb.isOpen()).isTrue();
+
+        // Reset mockHttpClient to verify it's NOT called when circuit is OPEN
+        Mockito.clearInvocations(mockHttpClient);
+
+        // Call 3 with circuit OPEN -> fast-fails to fallback without calling mockHttpClient
+        RouteDirectionResponse resp3 = genericRestProvider.getDirections(req);
+        assertThat(resp3.isSuccess()).isTrue();
+        assertThat(resp3.getProvider()).isEqualTo("MOCK");
+        Mockito.verify(mockHttpClient, Mockito.never()).send(any(), any());
     }
 }

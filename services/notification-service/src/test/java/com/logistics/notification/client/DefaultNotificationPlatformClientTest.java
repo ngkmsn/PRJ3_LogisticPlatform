@@ -199,4 +199,193 @@ class DefaultNotificationPlatformClientTest {
         assertThat(result.getAttempts()).isEqualTo(2);
         assertThat(result.getErrorMessage()).contains("Connection refused");
     }
+
+    @Test
+    @DisplayName("PB-054: Circuit breaker trips OPEN after failureThreshold consecutive failures")
+    void testCircuitBreaker_tripsOpenAfterFailures() throws Exception {
+        when(mockResponse.statusCode()).thenReturn(503);
+        when(mockResponse.body()).thenReturn("{\"error\":\"Service Unavailable\"}");
+        when(mockHttpClient.send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class)))
+                .thenReturn(mockResponse);
+
+        DefaultNotificationPlatformClient client = new DefaultNotificationPlatformClient(
+                "http://localhost:8085", "/api/v1/notifications",
+                Optional.empty(), Optional.empty(),
+                3, 5, 1, 10,
+                objectMapper, mockHttpClient
+        );
+
+        com.logistics.common.circuitbreaker.CircuitBreaker cb = new com.logistics.common.circuitbreaker.CircuitBreaker(
+                "test-cb",
+                com.logistics.common.circuitbreaker.CircuitBreakerConfig.builder()
+                        .failureThreshold(2)
+                        .openDuration(java.time.Duration.ofMillis(100))
+                        .successThreshold(2)
+                        .trialCalls(2)
+                        .build()
+        );
+        client.setCircuitBreaker(cb);
+
+        NotificationPlatformRequest request = new NotificationPlatformRequest("0988776655", "SMS", "Sub", "Content", "NORMAL");
+
+        // Call 1: fails -> failures = 1
+        client.sendNotification(request, "evt-1");
+        assertThat(cb.isClosed()).isTrue();
+
+        // Call 2: fails -> failures = 2 -> trips to OPEN
+        client.sendNotification(request, "evt-2");
+        assertThat(cb.isOpen()).isTrue();
+    }
+
+    @Test
+    @DisplayName("PB-054: When circuit is OPEN, calls are short-circuited immediately without HTTP calls")
+    void testCircuitBreaker_shortCircuitsWhenOpen() throws Exception {
+        DefaultNotificationPlatformClient client = new DefaultNotificationPlatformClient(
+                "http://localhost:8085", "/api/v1/notifications",
+                Optional.empty(), Optional.empty(),
+                3, 5, 1, 10,
+                objectMapper, mockHttpClient
+        );
+
+        com.logistics.common.circuitbreaker.CircuitBreaker cb = new com.logistics.common.circuitbreaker.CircuitBreaker(
+                "test-short-circuit",
+                com.logistics.common.circuitbreaker.CircuitBreakerConfig.builder()
+                        .failureThreshold(1)
+                        .openDuration(java.time.Duration.ofMillis(1000))
+                        .build()
+        );
+        cb.recordFailure(new IOException("Downstream down"));
+        assertThat(cb.isOpen()).isTrue();
+
+        client.setCircuitBreaker(cb);
+
+        NotificationPlatformRequest request = new NotificationPlatformRequest("0988776655", "SMS", "Sub", "Content", "NORMAL");
+        NotificationPlatformResult result = client.sendNotification(request, "evt-fast-fail");
+
+        assertThat(result.isSuccess()).isFalse();
+        assertThat(result.isCircuitOpen()).isTrue();
+        assertThat(result.getAttempts()).isZero();
+        assertThat(result.getErrorMessage()).contains("is OPEN");
+
+        // Verify NO HTTP requests were sent
+        verify(mockHttpClient, never()).send(any(), any());
+    }
+
+    @Test
+    @DisplayName("PB-054: Client errors (400 Bad Request) do NOT trip the circuit breaker")
+    void testCircuitBreaker_clientErrorsDoNotTripCircuit() throws Exception {
+        when(mockResponse.statusCode()).thenReturn(400);
+        when(mockResponse.body()).thenReturn("{\"error\":\"invalid payload\"}");
+        when(mockHttpClient.send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class)))
+                .thenReturn(mockResponse);
+
+        DefaultNotificationPlatformClient client = new DefaultNotificationPlatformClient(
+                "http://localhost:8085", "/api/v1/notifications",
+                Optional.empty(), Optional.empty(),
+                3, 5, 1, 10,
+                objectMapper, mockHttpClient
+        );
+
+        com.logistics.common.circuitbreaker.CircuitBreaker cb = new com.logistics.common.circuitbreaker.CircuitBreaker(
+                "test-client-errors",
+                com.logistics.common.circuitbreaker.CircuitBreakerConfig.builder()
+                        .failureThreshold(2)
+                        .build()
+        );
+        client.setCircuitBreaker(cb);
+
+        NotificationPlatformRequest request = new NotificationPlatformRequest("0988776655", "SMS", "Sub", "Content", "NORMAL");
+
+        // 3 consecutive 400 Bad Request responses
+        client.sendNotification(request, "evt-400-1");
+        client.sendNotification(request, "evt-400-2");
+        client.sendNotification(request, "evt-400-3");
+
+        // Circuit must remain CLOSED
+        assertThat(cb.isClosed()).isTrue();
+        assertThat(cb.getMetrics().getCircuitOpenCount()).isZero();
+    }
+
+    @Test
+    @DisplayName("PB-054: Recovers from HALF_OPEN to CLOSED when downstream becomes healthy")
+    void testCircuitBreaker_halfOpenRecovery() throws Exception {
+        DefaultNotificationPlatformClient client = new DefaultNotificationPlatformClient(
+                "http://localhost:8085", "/api/v1/notifications",
+                Optional.empty(), Optional.empty(),
+                3, 5, 1, 10,
+                objectMapper, mockHttpClient
+        );
+
+        com.logistics.common.circuitbreaker.CircuitBreaker cb = new com.logistics.common.circuitbreaker.CircuitBreaker(
+                "test-recovery",
+                com.logistics.common.circuitbreaker.CircuitBreakerConfig.builder()
+                        .failureThreshold(1)
+                        .openDuration(java.time.Duration.ofMillis(80))
+                        .successThreshold(2)
+                        .trialCalls(2)
+                        .build()
+        );
+        cb.recordFailure(new IOException("Downstream down"));
+        assertThat(cb.isOpen()).isTrue();
+
+        client.setCircuitBreaker(cb);
+
+        // Wait for open window to expire
+        Thread.sleep(100);
+        assertThat(cb.isHalfOpen()).isTrue();
+
+        // Downstream now recovers: returns 202
+        when(mockResponse.statusCode()).thenReturn(202);
+        when(mockResponse.body()).thenReturn("{\"id\":\"" + UUID.randomUUID() + "\",\"status\":\"QUEUED\"}");
+        when(mockHttpClient.send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class)))
+                .thenReturn(mockResponse);
+
+        NotificationPlatformRequest request = new NotificationPlatformRequest("0988776655", "SMS", "Sub", "Content", "NORMAL");
+
+        // Probe call 1 succeeds
+        NotificationPlatformResult r1 = client.sendNotification(request, "evt-probe-1");
+        assertThat(r1.isSuccess()).isTrue();
+        assertThat(cb.isHalfOpen()).isTrue();
+
+        // Probe call 2 succeeds -> circuit closes!
+        NotificationPlatformResult r2 = client.sendNotification(request, "evt-probe-2");
+        assertThat(r2.isSuccess()).isTrue();
+        assertThat(cb.isClosed()).isTrue();
+    }
+
+    @Test
+    @DisplayName("PB-055: Rate Limiting regulates downstream requests using Token Bucket without dropping events")
+    void testSendNotification_rateLimiting_regulatesThroughput() throws Exception {
+        when(mockResponse.statusCode()).thenReturn(202);
+        when(mockResponse.body()).thenReturn("{\"id\":\"" + UUID.randomUUID() + "\",\"status\":\"QUEUED\"}");
+        when(mockHttpClient.send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class)))
+                .thenReturn(mockResponse);
+
+        DefaultNotificationPlatformClient client = new DefaultNotificationPlatformClient(
+                "http://localhost:8085",
+                "/api/v1/notifications",
+                Optional.empty(),
+                Optional.empty(),
+                1, 1, 1, 10, 100, 2.0, 0.0,
+                objectMapper, mockHttpClient
+        );
+
+        // Configure a rate limiter of 10 permits/sec with burst 2.0
+        com.logistics.common.ratelimit.EventRateLimiter rateLimiter =
+                new com.logistics.common.ratelimit.EventRateLimiter(10.0, 2.0);
+        client.setEventRateLimiter(rateLimiter);
+
+        NotificationPlatformRequest request = new NotificationPlatformRequest("user-1", "EMAIL", "Sub", "Body", "NORMAL");
+
+        // First 2 calls use available burst permits
+        NotificationPlatformResult r1 = client.sendNotification(request, "evt-rl-1");
+        NotificationPlatformResult r2 = client.sendNotification(request, "evt-rl-2");
+        assertThat(r1.isSuccess()).isTrue();
+        assertThat(r2.isSuccess()).isTrue();
+
+        // 3rd call will acquire permit cleanly after refill without dropping event
+        NotificationPlatformResult r3 = client.sendNotification(request, "evt-rl-3");
+        assertThat(r3.isSuccess()).isTrue();
+        verify(mockHttpClient, times(3)).send(any(HttpRequest.class), any());
+    }
 }

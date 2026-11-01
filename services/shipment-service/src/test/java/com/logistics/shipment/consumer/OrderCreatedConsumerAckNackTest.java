@@ -39,6 +39,9 @@ class OrderCreatedConsumerAckNackTest {
     private InboxEventService inboxEventService;
 
     @Mock
+    private com.logistics.shipment.service.DeadLetterQueueService deadLetterQueueService;
+
+    @Mock
     private Message<String> message;
 
     private OrderCreatedConsumer consumer;
@@ -213,5 +216,96 @@ class OrderCreatedConsumerAckNackTest {
         verify(message).ack();
         verify(message, never()).nack(any());
         verify(inboxEventService, never()).processOrderCreatedWithInbox(anyString(), anyString(), anyString(), any());
+    }
+
+    @Test
+    @DisplayName("PB-053 DLQ: Poison message routed to DLQ successfully triggers message.ack() to unblock partition")
+    void consume_withDlqService_invalidPayload_routesToDlqAndAcknowledges() {
+        OrderEventValidator validator = new OrderEventValidator();
+        OrderCreatedConsumer dlqConsumer = new OrderCreatedConsumer(assignmentService, inboxEventService, validator, objectMapper, deadLetterQueueService);
+
+        String invalidJson = """
+                {
+                    "eventType": "ORDER_CREATED",
+                    "aggregateId": "ord-poison",
+                    "payload": {
+                        "customerId": "cust-poison"
+                    }
+                }
+                """;
+
+        when(message.getPayload()).thenReturn(invalidJson);
+        when(deadLetterQueueService.sendToDlq(anyString(), eq(invalidJson), any(Throwable.class), eq(1)))
+                .thenReturn(CompletableFuture.completedFuture(null));
+        when(message.ack()).thenReturn(CompletableFuture.completedFuture(null));
+
+        CompletionStage<Void> stage = dlqConsumer.consume(message);
+
+        assertThat(stage).isNotNull();
+        verify(deadLetterQueueService).sendToDlq(anyString(), eq(invalidJson), any(Throwable.class), eq(1));
+        verify(message).ack();
+        verify(message, never()).nack(any());
+    }
+
+    @Test
+    @DisplayName("PB-053 DLQ: DLQ emission failure nacks original message to prevent message loss")
+    void consume_withDlqService_dlqFails_nacksMessage() {
+        OrderEventValidator validator = new OrderEventValidator();
+        OrderCreatedConsumer dlqConsumer = new OrderCreatedConsumer(assignmentService, inboxEventService, validator, objectMapper, deadLetterQueueService);
+
+        String invalidJson = """
+                {
+                    "eventType": "ORDER_CREATED",
+                    "payload": {
+                    }
+                }
+                """;
+
+        RuntimeException dlqBrokerError = new RuntimeException("DLQ Kafka broker unavailable");
+        when(message.getPayload()).thenReturn(invalidJson);
+        when(deadLetterQueueService.sendToDlq(anyString(), eq(invalidJson), any(Throwable.class), eq(1)))
+                .thenReturn(CompletableFuture.failedFuture(dlqBrokerError));
+        when(message.nack(any())).thenReturn(CompletableFuture.completedFuture(null));
+
+        CompletionStage<Void> stage = dlqConsumer.consume(message);
+
+        assertThat(stage).isNotNull();
+        verify(deadLetterQueueService).sendToDlq(anyString(), eq(invalidJson), any(Throwable.class), eq(1));
+        verify(message).nack(any(Throwable.class));
+        verify(message, never()).ack();
+    }
+
+    @Test
+    @DisplayName("PB-053 DLQ: Successfully processed message is NEVER routed to DLQ")
+    void consume_withDlqService_success_neverRoutesToDlq() {
+        OrderEventValidator validator = new OrderEventValidator();
+        OrderCreatedConsumer dlqConsumer = new OrderCreatedConsumer(assignmentService, inboxEventService, validator, objectMapper, deadLetterQueueService);
+
+        String eventId = "evt-dlq-success";
+        String orderId = "ord-dlq-success";
+        String validJson = """
+                {
+                    "eventId": "%s",
+                    "eventType": "ORDER_CREATED",
+                    "aggregateId": "%s",
+                    "payload": {
+                        "orderId": "%s",
+                        "orderNumber": "ORD-DLQ-1",
+                        "customerId": "cust-dlq",
+                        "deliveryAddress": "Address 100"
+                    }
+                }
+                """.formatted(eventId, orderId, orderId);
+
+        when(message.getPayload()).thenReturn(validJson);
+        when(message.ack()).thenReturn(CompletableFuture.completedFuture(null));
+        when(inboxEventService.processOrderCreatedWithInbox(eq(eventId), eq("ORDER_CREATED"), eq(orderId), any(OrderCreatedPayload.class)))
+                .thenReturn(new Assignment());
+
+        CompletionStage<Void> stage = dlqConsumer.consume(message);
+
+        assertThat(stage).isNotNull();
+        verify(message).ack();
+        verify(deadLetterQueueService, never()).sendToDlq(anyString(), anyString(), any(), any(Integer.class));
     }
 }

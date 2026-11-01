@@ -27,6 +27,8 @@ databaseChangeLog:
       file: db/changelog/changes/013-create-driver-locations-table.yaml
   - include:
       file: db/changelog/changes/014-create-outbox-events-table.yaml
+  - include:
+      file: db/changelog/changes/015-create-dead-letter-messages-table.yaml
 
 
 

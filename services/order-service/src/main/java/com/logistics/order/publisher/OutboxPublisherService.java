@@ -3,6 +3,8 @@ package com.logistics.order.publisher;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.logistics.common.event.DomainEvent;
 import com.logistics.common.event.KafkaTopics;
+import com.logistics.common.retry.BackoffCalculator;
+import com.logistics.common.retry.RetryPolicy;
 import com.logistics.order.entity.OutboxEvent;
 import com.logistics.order.repository.OutboxEventRepository;
 import io.quarkus.runtime.StartupEvent;
@@ -14,6 +16,7 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
@@ -44,6 +47,20 @@ public class OutboxPublisherService {
     @ConfigProperty(name = "outbox.publisher.stale-timeout-minutes", defaultValue = "5")
     long staleTimeoutMinutes;
 
+    @ConfigProperty(name = "outbox.publisher.initial-backoff-ms", defaultValue = "1000")
+    long initialBackoffMs = 1000;
+
+    @ConfigProperty(name = "outbox.publisher.max-backoff-ms", defaultValue = "30000")
+    long maxBackoffMs = 30000;
+
+    @ConfigProperty(name = "outbox.publisher.backoff-multiplier", defaultValue = "2.0")
+    double backoffMultiplier = 2.0;
+
+    @ConfigProperty(name = "outbox.publisher.jitter-factor", defaultValue = "0.2")
+    double jitterFactor = 0.2;
+
+    private BackoffCalculator backoffCalculator;
+
     public OutboxPublisherService() {
     }
 
@@ -57,6 +74,22 @@ public class OutboxPublisherService {
         this.batchSize = 50;
         this.maxRetries = 5;
         this.staleTimeoutMinutes = 5;
+        this.initialBackoffMs = 1000;
+        this.maxBackoffMs = 30000;
+        this.backoffMultiplier = 2.0;
+        this.jitterFactor = 0.2;
+        initBackoffCalculator();
+    }
+
+    private void initBackoffCalculator() {
+        RetryPolicy policy = RetryPolicy.builder()
+                .maxRetries(maxRetries)
+                .initialBackoff(Duration.ofMillis(Math.max(1, initialBackoffMs)))
+                .maxBackoff(Duration.ofMillis(Math.max(initialBackoffMs, maxBackoffMs)))
+                .multiplier(Math.max(1.0, backoffMultiplier))
+                .jitterFactor(Math.max(0.0, Math.min(1.0, jitterFactor)))
+                .build();
+        this.backoffCalculator = new BackoffCalculator(policy);
     }
 
     public void onStart(@Observes StartupEvent ev) {
@@ -93,8 +126,23 @@ public class OutboxPublisherService {
         }
 
         int publishedCount = 0;
+        Instant now = Instant.now();
+
+        if (backoffCalculator == null) {
+            initBackoffCalculator();
+        }
 
         for (OutboxEvent event : pendingEvents) {
+            // PB-052: Check exponential backoff for previously failed events
+            if (event.getRetryCount() > 0 && event.getOccurredAt() != null) {
+                Duration requiredBackoff = backoffCalculator.computeBackoff(event.getRetryCount());
+                if (event.getOccurredAt().plus(requiredBackoff).isAfter(now)) {
+                    log.debug("PB-052 [OUTBOX_BACKOFF] Event '{}' (retryCount={}) backoff of {}ms not reached yet, skipping",
+                            event.getId(), event.getRetryCount(), requiredBackoff.toMillis());
+                    continue;
+                }
+            }
+
             // Atomic claim to prevent duplicate processing by concurrent publisher nodes
             boolean claimed = outboxEventRepository.claimEventForProcessing(event.getId());
             if (!claimed) {

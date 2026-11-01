@@ -11,20 +11,20 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 class NotificationTemplateMapperTest {
 
-    private NotificationTemplateMapper mapper;
     private ObjectMapper objectMapper;
 
     @BeforeEach
     void setUp() {
-        mapper = new NotificationTemplateMapper();
         objectMapper = new ObjectMapper();
     }
 
     @Test
-    @DisplayName("PB-051: ORDER_DELIVERED maps to SMS when phone is provided")
-    void testOrderDeliveredMapping() {
+    @DisplayName("PB-051: Default PUSH mode routes to customerId userId for FCM real delivery")
+    void testOrderDelivered_pushMode() {
+        NotificationTemplateMapper mapper = new NotificationTemplateMapper("PUSH");
         ObjectNode payload = objectMapper.createObjectNode()
                 .put("orderNumber", "ORD-101")
+                .put("customerId", "cust-user-123")
                 .put("recipientName", "Nguyen Van A")
                 .put("recipientPhone", "0988112233")
                 .put("driverId", "drv-01")
@@ -33,8 +33,8 @@ class NotificationTemplateMapperTest {
         NotificationPlatformRequest req = mapper.mapEventToPlatformRequest("ORDER_DELIVERED", "ord-101", payload);
 
         assertThat(req).isNotNull();
-        assertThat(req.getRecipient()).isEqualTo("0988112233");
-        assertThat(req.getChannel()).isEqualTo("SMS");
+        assertThat(req.getRecipient()).isEqualTo("cust-user-123");
+        assertThat(req.getChannel()).isEqualTo("PUSH");
         assertThat(req.getPriority()).isEqualTo("NORMAL");
         assertThat(req.getSubject()).isEqualTo("Đơn hàng ORD-101 đã được giao thành công");
         assertThat(req.getContent()).contains("Nguyen Van A")
@@ -43,8 +43,9 @@ class NotificationTemplateMapperTest {
     }
 
     @Test
-    @DisplayName("PB-051: ORDER_FAILED maps to HIGH priority with failure reason")
-    void testOrderFailedMapping() {
+    @DisplayName("PB-051: Configured SMS mode maps to phone number recipient")
+    void testOrderFailed_smsMode() {
+        NotificationTemplateMapper mapper = new NotificationTemplateMapper("SMS");
         ObjectNode payload = objectMapper.createObjectNode()
                 .put("orderNumber", "ORD-102")
                 .put("recipientName", "Tran Thi B")
@@ -62,8 +63,9 @@ class NotificationTemplateMapperTest {
     }
 
     @Test
-    @DisplayName("PB-051: Phone absent falls back to customerId and EMAIL channel")
-    void testFallbackToEmailWhenPhoneAbsent() {
+    @DisplayName("PB-051: Configured EMAIL mode maps to customerId with EMAIL channel")
+    void testEmailMode() {
+        NotificationTemplateMapper mapper = new NotificationTemplateMapper("EMAIL");
         ObjectNode payload = objectMapper.createObjectNode()
                 .put("orderNumber", "ORD-103")
                 .put("customerId", "cust-abc@example.com")
@@ -79,6 +81,7 @@ class NotificationTemplateMapperTest {
     @Test
     @DisplayName("PB-051: ORDER_CANCELLED maps to HIGH priority")
     void testOrderCancelledMapping() {
+        NotificationTemplateMapper mapper = new NotificationTemplateMapper("PUSH");
         ObjectNode payload = objectMapper.createObjectNode()
                 .put("orderNumber", "ORD-104")
                 .put("customerId", "cust-004")
@@ -95,6 +98,7 @@ class NotificationTemplateMapperTest {
     @Test
     @DisplayName("PB-051: Unrecognized event types return null (no customer spam)")
     void testUnrecognizedEventReturnsNull() {
+        NotificationTemplateMapper mapper = new NotificationTemplateMapper("PUSH");
         ObjectNode payload = objectMapper.createObjectNode().put("foo", "bar");
         NotificationPlatformRequest req = mapper.mapEventToPlatformRequest("SOME_INTERNAL_EVENT", "ord-999", payload);
         assertThat(req).isNull();

@@ -44,6 +44,7 @@ class ShipmentNotificationConsumerTest {
     void setUp() {
         notificationRepository.deleteAll();
         inboxEventRepository.deleteAll();
+        consumer.setBackpressureController(null);
     }
 
     @Test
@@ -81,8 +82,8 @@ class ShipmentNotificationConsumerTest {
         assertThat(notification.getEventId()).isEqualTo(eventId);
         assertThat(notification.getEventType()).isEqualTo("ORDER_DELIVERED");
         assertThat(notification.getOrderId()).isEqualTo(orderId);
-        assertThat(notification.getRecipient()).isEqualTo("0988776655");
-        assertThat(notification.getChannel()).isEqualTo("SMS");
+        assertThat(notification.getRecipient()).isEqualTo("cust-999");
+        assertThat(notification.getChannel()).isEqualTo("PUSH");
         assertThat(notification.getPriority()).isEqualTo("NORMAL");
         assertThat(notification.getSubject()).contains("ORD-20261022-DEL01");
         assertThat(notification.getContent()).contains("Nguyen Van Nam");
@@ -241,5 +242,69 @@ class ShipmentNotificationConsumerTest {
         List<Notification> saved = notificationRepository.findByEventId(eventId);
         assertThat(saved).hasSize(1);
         assertThat(saved.get(0).getStatus()).isEqualTo("FAILED");
+    }
+
+    @Test
+    @DisplayName("PB-054: When Circuit Breaker is OPEN, records FAILED notification and preserves event without loss")
+    void testCircuitBreakerOpen_recordsFailedNotificationAndPreservesEvent() throws Exception {
+        when(notificationPlatformClient.sendNotification(any(), any()))
+                .thenReturn(NotificationPlatformResult.circuitOpen("Circuit breaker 'notification-platform' is OPEN: Notification Platform is currently unavailable."));
+
+        String eventId = "evt-cb-open-" + UUID.randomUUID();
+        String orderId = "ord-cb-9009";
+        String json = "{\n" +
+                "  \"eventId\": \"" + eventId + "\",\n" +
+                "  \"eventType\": \"ORDER_DELIVERED\",\n" +
+                "  \"aggregateId\": \"" + orderId + "\",\n" +
+                "  \"payload\": {\n" +
+                "    \"orderId\": \"" + orderId + "\",\n" +
+                "    \"orderNumber\": \"ORD-9009\",\n" +
+                "    \"recipientName\": \"Le Thi Hoa\",\n" +
+                "    \"recipientPhone\": \"0988112233\",\n" +
+                "    \"status\": \"DELIVERED\"\n" +
+                "  }\n" +
+                "}";
+
+        Notification result = consumer.processEvent(json);
+
+        assertThat(result).isNotNull();
+        assertThat(result.getStatus()).isEqualTo("FAILED");
+        assertThat(result.getErrorMessage()).contains("Circuit breaker 'notification-platform' is OPEN");
+        assertThat(result.getRetryCount()).isZero();
+
+        // Preserved in database with FAILED status for future retry
+        List<Notification> saved = notificationRepository.findByEventId(eventId);
+        assertThat(saved).hasSize(1);
+        assertThat(saved.get(0).getStatus()).isEqualTo("FAILED");
+
+        // Inbox event also recorded
+        assertThat(inboxEventRepository.existsByEventId(eventId)).isTrue();
+    }
+
+    @Test
+    @DisplayName("PB-056: When Consumer Backpressure is saturated, message is NACKed to prevent heap bloat and preserve in broker")
+    void testBackpressureSaturated_nacksMessage() {
+        org.eclipse.microprofile.reactive.messaging.Message<String> mockMessage = mock(org.eclipse.microprofile.reactive.messaging.Message.class);
+        when(mockMessage.getPayload()).thenReturn("{\"eventId\":\"evt-bp-1\",\"eventType\":\"ORDER_DELIVERED\"}");
+        when(mockMessage.nack(any(Throwable.class))).thenReturn(java.util.concurrent.CompletableFuture.completedFuture(null));
+
+        // Create a controller with maxConcurrency = 1 and saturate it
+        com.logistics.common.backpressure.BackpressureConfig bpConfig = com.logistics.common.backpressure.BackpressureConfig.builder()
+                .name("test-bp-sat")
+                .maxConcurrency(1)
+                .build();
+        com.logistics.common.backpressure.BackpressureController testController = new com.logistics.common.backpressure.BackpressureController(bpConfig);
+        assertThat(testController.tryAcquire()).isTrue(); // Saturate the only permit!
+
+        try {
+            consumer.setBackpressureController(testController);
+
+            consumer.consume(mockMessage);
+
+            verify(mockMessage).nack(any(com.logistics.common.backpressure.BackpressureExecutionException.class));
+            verify(mockMessage, never()).ack();
+        } finally {
+            consumer.setBackpressureController(null);
+        }
     }
 }

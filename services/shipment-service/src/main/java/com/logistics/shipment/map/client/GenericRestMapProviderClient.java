@@ -2,11 +2,17 @@ package com.logistics.shipment.map.client;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.logistics.common.circuitbreaker.CircuitBreaker;
+import com.logistics.common.circuitbreaker.CircuitBreakerConfig;
+import com.logistics.common.circuitbreaker.CircuitBreakerRegistry;
 import com.logistics.common.dto.GeocodeResponse;
 import com.logistics.common.dto.MapCoordinatesDto;
 import com.logistics.common.dto.RouteDirectionRequest;
 import com.logistics.common.dto.RouteDirectionResponse;
 import com.logistics.common.dto.RouteStepDto;
+import com.logistics.common.retry.ErrorClassifier;
+import com.logistics.common.retry.RetryExecutor;
+import com.logistics.common.retry.RetryPolicy;
 import com.logistics.shipment.map.config.MapConfiguration;
 import com.logistics.shipment.map.exception.MapConfigurationException;
 import com.logistics.shipment.map.exception.MapException;
@@ -50,11 +56,34 @@ public class GenericRestMapProviderClient implements MapProviderClient {
     MockMapProviderClient mockFallbackClient;
 
     private HttpClient httpClient;
+    private CircuitBreaker circuitBreaker;
 
     public GenericRestMapProviderClient() {
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(3))
                 .build();
+    }
+
+    public void initCircuitBreaker() {
+        CircuitBreakerConfig cbConfig = CircuitBreakerConfig.builder()
+                .failureThreshold(3)
+                .openDuration(Duration.ofSeconds(10))
+                .successThreshold(2)
+                .trialCalls(2)
+                .failurePredicate(ErrorClassifier::isTransientError)
+                .build();
+        this.circuitBreaker = CircuitBreakerRegistry.getInstance().getOrCreate("map-provider", cbConfig);
+    }
+
+    public void setCircuitBreaker(CircuitBreaker circuitBreaker) {
+        this.circuitBreaker = circuitBreaker;
+    }
+
+    public CircuitBreaker getCircuitBreaker() {
+        if (this.circuitBreaker == null) {
+            initCircuitBreaker();
+        }
+        return this.circuitBreaker;
     }
 
     // For testing
@@ -86,15 +115,73 @@ public class GenericRestMapProviderClient implements MapProviderClient {
             throw new MapInvalidRequestException("Invalid coordinate boundaries", PROVIDER_NAME);
         }
 
-        String baseUrl = configuration.getServiceUrl();
-        if (baseUrl.endsWith("/")) {
-            baseUrl = baseUrl.substring(0, baseUrl.length() - 1);
+        if (circuitBreaker == null) {
+            initCircuitBreaker();
         }
+
+        // PB-054: Fast-fail or fallback if Circuit Breaker is OPEN
+        if (circuitBreaker != null && circuitBreaker.isOpen()) {
+            log.warn("PB-054 [CIRCUIT_SHORT_CIRCUIT] Map provider circuit breaker is OPEN.");
+            if (configuration != null && configuration.isFallbackEnabled() && mockFallbackClient != null) {
+                log.info("PB-054 [CIRCUIT_FALLBACK] Executing mock fallback route calculation.");
+                return mockFallbackClient.getDirections(request);
+            }
+            throw new MapServiceUnavailableException("Map provider circuit breaker is OPEN", PROVIDER_NAME);
+        }
+
+        String rawBaseUrl = configuration.getServiceUrl();
+        final String baseUrl = (rawBaseUrl != null && rawBaseUrl.endsWith("/"))
+                ? rawBaseUrl.substring(0, rawBaseUrl.length() - 1)
+                : (rawBaseUrl != null ? rawBaseUrl : "");
         String endpoint = baseUrl + "/directions";
 
         String apiKey = configuration.getApiKey();
         long timeoutMs = configuration.getTimeoutMs();
 
+        RetryPolicy retryPolicy = RetryPolicy.builder()
+                .maxRetries(configuration.getMaxRetries())
+                .initialBackoff(Duration.ofMillis(50))
+                .maxBackoff(Duration.ofMillis(1000))
+                .multiplier(2.0)
+                .jitterFactor(0.2)
+                .retryPredicate(ErrorClassifier::isRetryable)
+                .build();
+        RetryExecutor retryExecutor = new RetryExecutor();
+
+        try {
+            RouteDirectionResponse response = retryExecutor.execute("generic-rest-map-directions", retryPolicy,
+                    () -> executeCall(endpoint, apiKey, timeoutMs, request, baseUrl));
+            if (circuitBreaker != null) {
+                circuitBreaker.recordSuccess();
+            }
+            return response;
+        } catch (MapException e) {
+            if (circuitBreaker != null && (e instanceof MapServiceUnavailableException || e instanceof MapServiceTimeoutException)) {
+                circuitBreaker.recordFailure(e);
+            }
+            if (configuration != null && configuration.isFallbackEnabled() && mockFallbackClient != null
+                    && (e instanceof MapServiceUnavailableException || e instanceof MapServiceTimeoutException)) {
+                log.warn("PB-054 [MAP_ERROR_FALLBACK] Map provider call failed with transient error: {}. Falling back to mock client.", e.getMessage());
+                return mockFallbackClient.getDirections(request);
+            }
+            throw e;
+        } catch (Exception e) {
+            if (circuitBreaker != null) {
+                circuitBreaker.recordFailure(e);
+            }
+            if (configuration != null && configuration.isFallbackEnabled() && mockFallbackClient != null) {
+                log.warn("PB-054 [MAP_ERROR_FALLBACK] Map provider call failed: {}. Falling back to mock client.", e.getMessage());
+                return mockFallbackClient.getDirections(request);
+            }
+            if (e.getCause() instanceof MapException me) {
+                throw me;
+            }
+            throw new MapServiceUnavailableException("Map provider request failed: " + e.getMessage(), e, PROVIDER_NAME);
+        }
+    }
+
+    private RouteDirectionResponse executeCall(String endpoint, String apiKey, long timeoutMs,
+                                              RouteDirectionRequest request, String baseUrl) throws Exception {
         try {
             String requestBody = objectMapper.writeValueAsString(request);
             HttpRequest httpRequest = HttpRequest.newBuilder()
@@ -114,7 +201,11 @@ public class GenericRestMapProviderClient implements MapProviderClient {
                 throw new MapConfigurationException("Invalid or unauthorized API key for map provider", PROVIDER_NAME);
             }
             if (status == 429) {
-                throw new MapRateLimitException("Provider rate limit exceeded (HTTP 429)", PROVIDER_NAME);
+                Duration retryAfter = response.headers().firstValue("Retry-After")
+                        .map(v -> {
+                            try { return Duration.ofSeconds(Long.parseLong(v.trim())); } catch (Exception ignored) { return null; }
+                        }).orElse(null);
+                throw new MapRateLimitException("Provider rate limit exceeded (HTTP 429)", PROVIDER_NAME, retryAfter);
             }
             if (status == 400) {
                 throw new MapInvalidRequestException("Provider rejected request: " + response.body(), PROVIDER_NAME);

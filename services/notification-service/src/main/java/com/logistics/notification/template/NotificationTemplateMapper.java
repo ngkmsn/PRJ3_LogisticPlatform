@@ -19,6 +19,16 @@ public class NotificationTemplateMapper {
     public static final String EVENT_TYPE_ORDER_IN_TRANSIT = "ORDER_IN_TRANSIT";
     public static final String EVENT_TYPE_ORDER_CANCELLED = "ORDER_CANCELLED";
 
+    @org.eclipse.microprofile.config.inject.ConfigProperty(name = "notification.platform.preferred-channel", defaultValue = "PUSH")
+    String preferredChannel = "PUSH";
+
+    public NotificationTemplateMapper() {
+    }
+
+    public NotificationTemplateMapper(String preferredChannel) {
+        this.preferredChannel = preferredChannel;
+    }
+
     public NotificationPlatformRequest mapEventToPlatformRequest(String eventType, String aggregateId, JsonNode payload) {
         if (eventType == null || payload == null) {
             return null;
@@ -31,8 +41,26 @@ public class NotificationTemplateMapper {
         String deliveryAddress = payload.hasNonNull("deliveryAddress") ? payload.get("deliveryAddress").asText() : "";
         String driverId = payload.hasNonNull("driverId") ? payload.get("driverId").asText() : "";
 
-        String recipient = (!recipientPhone.isBlank()) ? recipientPhone.trim() : customerId.trim();
-        String channel = (!recipientPhone.isBlank()) ? "SMS" : "EMAIL";
+        // Channel & Recipient determination:
+        // Notification Platform uses Firebase FCM for channel 'PUSH' targeting userId (customerId/driverId)
+        // or Fallbacks to SMS/EMAIL
+        String channel;
+        String recipient;
+
+        if ("PUSH".equalsIgnoreCase(preferredChannel)) {
+            channel = "PUSH";
+            recipient = (customerId != null && !customerId.isBlank()) ? customerId.trim() : recipientPhone.trim();
+        } else if ("SMS".equalsIgnoreCase(preferredChannel) && !recipientPhone.isBlank()) {
+            channel = "SMS";
+            recipient = recipientPhone.trim();
+        } else if ("EMAIL".equalsIgnoreCase(preferredChannel)) {
+            channel = "EMAIL";
+            recipient = customerId.trim();
+        } else {
+            // Default fallback
+            recipient = (!recipientPhone.isBlank()) ? recipientPhone.trim() : customerId.trim();
+            channel = (!recipientPhone.isBlank()) ? "SMS" : "EMAIL";
+        }
 
         String subject;
         String content;

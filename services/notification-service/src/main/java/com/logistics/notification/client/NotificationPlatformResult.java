@@ -31,6 +31,14 @@ public class NotificationPlatformResult {
         return new NotificationPlatformResult(false, null, "FAILED", statusCode, errorMessage, retryAfterSeconds, attempts);
     }
 
+    public static NotificationPlatformResult circuitOpen(String errorMessage) {
+        return new NotificationPlatformResult(false, null, "CIRCUIT_OPEN", 503, errorMessage, null, 0);
+    }
+
+    public boolean isCircuitOpen() {
+        return "CIRCUIT_OPEN".equalsIgnoreCase(status);
+    }
+
     public boolean isSuccess() {
         return success;
     }

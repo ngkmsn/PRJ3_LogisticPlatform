@@ -29,7 +29,18 @@ public class MapConfiguration {
     @ConfigProperty(name = "logistics.map.rate-limit.permits-per-second", defaultValue = "50")
     int rateLimitPermitsPerSecond;
 
+    @ConfigProperty(name = "logistics.map.max-retries", defaultValue = "2")
+    int maxRetries = 2;
+
     public MapConfiguration() {
+    }
+
+    public int getMaxRetries() {
+        return maxRetries >= 0 ? maxRetries : 2;
+    }
+
+    public void setMaxRetries(int maxRetries) {
+        this.maxRetries = maxRetries;
     }
 
     public String getProviderType() {

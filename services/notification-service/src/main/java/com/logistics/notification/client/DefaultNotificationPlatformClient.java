@@ -1,6 +1,13 @@
 package com.logistics.notification.client;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.logistics.common.circuitbreaker.CircuitBreaker;
+import com.logistics.common.circuitbreaker.CircuitBreakerConfig;
+import com.logistics.common.circuitbreaker.CircuitBreakerRegistry;
+import com.logistics.common.ratelimit.EventRateLimiter;
+import com.logistics.common.retry.BackoffCalculator;
+import com.logistics.common.retry.ErrorClassifier;
+import com.logistics.common.retry.RetryPolicy;
 import io.quarkus.arc.DefaultBean;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -47,10 +54,43 @@ public class DefaultNotificationPlatformClient implements NotificationPlatformCl
     @ConfigProperty(name = "notification.platform.retry-delay-ms", defaultValue = "500")
     long retryDelayMs;
 
+    @ConfigProperty(name = "notification.platform.max-backoff-ms", defaultValue = "10000")
+    long maxBackoffMs = 10000;
+
+    @ConfigProperty(name = "notification.platform.backoff-multiplier", defaultValue = "2.0")
+    double backoffMultiplier = 2.0;
+
+    @ConfigProperty(name = "notification.platform.jitter-factor", defaultValue = "0.2")
+    double jitterFactor = 0.2;
+
+    @ConfigProperty(name = "notification.circuit-breaker.enabled", defaultValue = "true")
+    boolean circuitBreakerEnabled = true;
+
+    @ConfigProperty(name = "notification.circuit-breaker.failure-threshold", defaultValue = "3")
+    int cbFailureThreshold = 3;
+
+    @ConfigProperty(name = "notification.circuit-breaker.open-duration-ms", defaultValue = "10000")
+    long cbOpenDurationMs = 10000;
+
+    @ConfigProperty(name = "notification.circuit-breaker.success-threshold", defaultValue = "2")
+    int cbSuccessThreshold = 2;
+
+    @ConfigProperty(name = "notification.rate-limit.enabled", defaultValue = "true")
+    boolean rateLimitEnabled = true;
+
+    @ConfigProperty(name = "notification.rate-limit.permits-per-second", defaultValue = "50.0")
+    double rateLimitPermitsPerSecond = 50.0;
+
+    @ConfigProperty(name = "notification.rate-limit.burst-capacity", defaultValue = "50.0")
+    double rateLimitBurstCapacity = 50.0;
+
     @Inject
     ObjectMapper objectMapper;
 
     private HttpClient httpClient;
+    private BackoffCalculator backoffCalculator;
+    private CircuitBreaker circuitBreaker;
+    private EventRateLimiter eventRateLimiter;
 
     public DefaultNotificationPlatformClient() {
         this.httpClient = HttpClient.newBuilder()
@@ -63,6 +103,16 @@ public class DefaultNotificationPlatformClient implements NotificationPlatformCl
                                            int connectTimeoutSeconds, int requestTimeoutSeconds,
                                            int maxRetries, long retryDelayMs,
                                            ObjectMapper objectMapper, HttpClient httpClient) {
+        this(platformUrl, endpoint, apiKey, authToken, connectTimeoutSeconds, requestTimeoutSeconds,
+                maxRetries, retryDelayMs, 10000, 2.0, 0.2, objectMapper, httpClient);
+    }
+
+    public DefaultNotificationPlatformClient(String platformUrl, String endpoint,
+                                           Optional<String> apiKey, Optional<String> authToken,
+                                           int connectTimeoutSeconds, int requestTimeoutSeconds,
+                                           int maxRetries, long retryDelayMs,
+                                           long maxBackoffMs, double backoffMultiplier, double jitterFactor,
+                                           ObjectMapper objectMapper, HttpClient httpClient) {
         this.platformUrl = platformUrl;
         this.endpoint = endpoint;
         this.apiKey = apiKey;
@@ -71,10 +121,79 @@ public class DefaultNotificationPlatformClient implements NotificationPlatformCl
         this.requestTimeoutSeconds = requestTimeoutSeconds;
         this.maxRetries = maxRetries;
         this.retryDelayMs = retryDelayMs;
+        this.maxBackoffMs = maxBackoffMs;
+        this.backoffMultiplier = backoffMultiplier;
+        this.jitterFactor = jitterFactor;
         this.objectMapper = objectMapper;
         this.httpClient = httpClient != null ? httpClient : HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(connectTimeoutSeconds))
                 .build();
+        initBackoffCalculator();
+        initCircuitBreaker();
+    }
+
+    public void initCircuitBreaker() {
+        if (!circuitBreakerEnabled) {
+            this.circuitBreaker = null;
+            return;
+        }
+        CircuitBreakerConfig cbConfig = CircuitBreakerConfig.builder()
+                .failureThreshold(Math.max(1, cbFailureThreshold))
+                .openDuration(Duration.ofMillis(Math.max(100, cbOpenDurationMs)))
+                .successThreshold(Math.max(1, cbSuccessThreshold))
+                .trialCalls(Math.max(1, cbSuccessThreshold))
+                .failurePredicate(ErrorClassifier::isTransientError)
+                .build();
+        this.circuitBreaker = CircuitBreakerRegistry.getInstance().getOrCreate("notification-platform", cbConfig);
+    }
+
+    public void setCircuitBreaker(CircuitBreaker circuitBreaker) {
+        this.circuitBreaker = circuitBreaker;
+    }
+
+    public CircuitBreaker getCircuitBreaker() {
+        if (this.circuitBreaker == null && this.circuitBreakerEnabled) {
+            initCircuitBreaker();
+        }
+        return this.circuitBreaker;
+    }
+
+    public void setCircuitBreakerEnabled(boolean circuitBreakerEnabled) {
+        this.circuitBreakerEnabled = circuitBreakerEnabled;
+    }
+
+    public EventRateLimiter getEventRateLimiter() {
+        if (this.eventRateLimiter == null && this.rateLimitEnabled) {
+            this.eventRateLimiter = new EventRateLimiter(
+                    Math.max(1.0, rateLimitPermitsPerSecond),
+                    Math.max(1.0, rateLimitBurstCapacity)
+            );
+        }
+        return this.eventRateLimiter;
+    }
+
+    public void setEventRateLimiter(EventRateLimiter eventRateLimiter) {
+        this.eventRateLimiter = eventRateLimiter;
+    }
+
+    public void setRateLimitEnabled(boolean rateLimitEnabled) {
+        this.rateLimitEnabled = rateLimitEnabled;
+    }
+
+    private void initBackoffCalculator() {
+        long initial = Math.max(1, retryDelayMs);
+        long max = Math.max(initial, maxBackoffMs);
+        double mult = Math.max(1.0, backoffMultiplier);
+        double jitter = Math.max(0.0, Math.min(1.0, jitterFactor));
+
+        RetryPolicy policy = RetryPolicy.builder()
+                .maxRetries(maxRetries)
+                .initialBackoff(Duration.ofMillis(initial))
+                .maxBackoff(Duration.ofMillis(max))
+                .multiplier(mult)
+                .jitterFactor(jitter)
+                .build();
+        this.backoffCalculator = new BackoffCalculator(policy);
     }
 
     @Override
@@ -101,12 +220,32 @@ public class DefaultNotificationPlatformClient implements NotificationPlatformCl
             return NotificationPlatformResult.failure(400, "Serialization error: " + e.getMessage(), null, 0);
         }
 
+        if (circuitBreaker == null && circuitBreakerEnabled) {
+            initCircuitBreaker();
+        }
+
+        // PB-054: Fast-fail immediately if Circuit Breaker is OPEN to protect thread and network resources
+        if (circuitBreakerEnabled && circuitBreaker != null && circuitBreaker.isOpen()) {
+            log.warn("PB-054 [CIRCUIT_SHORT_CIRCUIT] Notification Platform circuit breaker is OPEN. Fast-failing request for eventId='{}' to conserve resources.", eventId);
+            return NotificationPlatformResult.circuitOpen(
+                    String.format("Circuit breaker '%s' is OPEN: Notification Platform is currently unavailable.", circuitBreaker.getName())
+            );
+        }
+
+        // PB-055: Rate limit outbound calls to prevent downstream saturation without dropping events
+        if (rateLimitEnabled && getEventRateLimiter() != null) {
+            getEventRateLimiter().acquire();
+        }
+
         int attempts = 0;
         int lastStatusCode = 0;
         String lastErrorMsg = null;
         Long retryAfterSeconds = null;
 
-        while (attempts < Math.max(1, maxRetries)) {
+        // When in HALF_OPEN, execute exactly 1 probe call to test health without redundant retries
+        int effectiveMaxRetries = (circuitBreaker != null && circuitBreaker.isHalfOpen()) ? 1 : Math.max(1, maxRetries);
+
+        while (attempts < effectiveMaxRetries) {
             attempts++;
             try {
                 HttpRequest.Builder reqBuilder = HttpRequest.newBuilder()
@@ -141,6 +280,9 @@ public class DefaultNotificationPlatformClient implements NotificationPlatformCl
                     NotificationPlatformResponse respObj = objectMapper.readValue(responseBody, NotificationPlatformResponse.class);
                     log.info("Notification Platform accepted request: id='{}', status='{}' (HTTP {})",
                             respObj.getId(), respObj.getStatus(), lastStatusCode);
+                    if (circuitBreaker != null) {
+                        circuitBreaker.recordSuccess();
+                    }
                     return NotificationPlatformResult.success(respObj.getId(), respObj.getStatus(), lastStatusCode, attempts);
                 }
 
@@ -148,6 +290,10 @@ public class DefaultNotificationPlatformClient implements NotificationPlatformCl
                 if (lastStatusCode == 400 || lastStatusCode == 401 || lastStatusCode == 403) {
                     lastErrorMsg = String.format("Notification Platform rejected request with HTTP %d: %s", lastStatusCode, responseBody);
                     log.warn("Non-retryable response from Notification Platform: {}", lastErrorMsg);
+                    if (circuitBreaker != null && circuitBreaker.isHalfOpen()) {
+                        // In HALF_OPEN, receiving a valid HTTP 4xx response proves the downstream server is alive
+                        circuitBreaker.recordSuccess();
+                    }
                     return NotificationPlatformResult.failure(lastStatusCode, lastErrorMsg, null, attempts);
                 }
 
@@ -181,14 +327,23 @@ public class DefaultNotificationPlatformClient implements NotificationPlatformCl
                 log.error("Unexpected error calling Notification Platform: {}", e.getMessage(), e);
             }
 
-            // Sleep backoff delay if retries remain
+            // Sleep backoff delay if retries remain using Exponential Backoff with Jitter (PB-052)
             if (attempts < maxRetries) {
-                long sleepMs = retryDelayMs;
-                if (retryAfterSeconds != null && retryAfterSeconds > 0 && retryAfterSeconds <= 5) {
-                    sleepMs = retryAfterSeconds * 1000;
+                if (backoffCalculator == null) {
+                    initBackoffCalculator();
                 }
+                Duration downstreamRetryAfter = (retryAfterSeconds != null && retryAfterSeconds > 0)
+                        ? Duration.ofSeconds(retryAfterSeconds)
+                        : null;
+                Duration delay = backoffCalculator.computeBackoff(attempts, downstreamRetryAfter);
+
+                log.warn("PB-052 [HTTP_RETRY_BACKOFF] op='NotificationPlatformClient.send', failedAttempt={}/{}, delay={}ms (retryAfterHeader={}), lastStatus={}",
+                        attempts, maxRetries, delay.toMillis(),
+                        downstreamRetryAfter != null ? downstreamRetryAfter.toSeconds() + "s" : "none",
+                        lastStatusCode);
+
                 try {
-                    Thread.sleep(sleepMs);
+                    Thread.sleep(delay.toMillis());
                 } catch (InterruptedException ie) {
                     Thread.currentThread().interrupt();
                     break;
@@ -198,6 +353,9 @@ public class DefaultNotificationPlatformClient implements NotificationPlatformCl
 
         log.error("Exhausted all {} attempts to call Notification Platform. Final status: {}, error: {}",
                 attempts, lastStatusCode, lastErrorMsg);
+        if (circuitBreaker != null) {
+            circuitBreaker.recordFailure(new IOException(lastErrorMsg != null ? lastErrorMsg : "Notification Platform unavailable (HTTP " + lastStatusCode + ")"));
+        }
         return NotificationPlatformResult.failure(lastStatusCode, lastErrorMsg, retryAfterSeconds, attempts);
     }
 }

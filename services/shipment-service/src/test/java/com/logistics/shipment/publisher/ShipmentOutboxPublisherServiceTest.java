@@ -15,6 +15,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -101,9 +102,9 @@ class ShipmentOutboxPublisherServiceTest {
                 OutboxStatus.PENDING,
                 1,
                 null,
-                Instant.now(),
+                Instant.now().minus(Duration.ofMinutes(10)), // Backoff window elapsed
                 null,
-                Instant.now()
+                Instant.now().minus(Duration.ofMinutes(10))
         );
 
         when(outboxEventRepository.findPendingEvents(anyInt(), anyInt()))
@@ -120,6 +121,33 @@ class ShipmentOutboxPublisherServiceTest {
         assertThat(published).isEqualTo(0);
         verify(outboxEventRepository, never()).markPublished(anyString(), any(Instant.class));
         verify(outboxEventRepository).recordPublishFailure(eq("evt-ship-002"), anyString(), eq(5));
+    }
+
+    @Test
+    @DisplayName("PB-052: Shipment outbox publisher skips retrying events whose exponential backoff window has not elapsed")
+    void testPublishPendingEvents_exponentialBackoff_skipsEventUntilBackoffElapses() {
+        OutboxEvent event = new OutboxEvent(
+                "evt-ship-wait",
+                "SHIPMENT",
+                "ord-wait",
+                "ORDER_FAILED",
+                "{\"orderId\":\"ord-wait\",\"status\":\"FAILED\"}",
+                OutboxStatus.PENDING,
+                2,
+                "Broker unreachable",
+                Instant.now(), // Just occurred now -> backoff window still active
+                null,
+                Instant.now()
+        );
+
+        when(outboxEventRepository.findPendingEvents(anyInt(), anyInt()))
+                .thenReturn(List.of(event));
+
+        int published = publisherService.publishPendingEvents();
+
+        assertThat(published).isEqualTo(0);
+        verify(outboxEventRepository, never()).claimEventForProcessing("evt-ship-wait");
+        verify(emitter, never()).send(any(Record.class));
     }
 
     @Test

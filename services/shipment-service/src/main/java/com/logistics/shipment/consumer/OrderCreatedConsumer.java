@@ -4,10 +4,12 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.logistics.common.event.KafkaTopics;
+import com.logistics.common.retry.RetryExhaustedException;
 import com.logistics.shipment.dto.OrderCreatedPayload;
 import com.logistics.shipment.entity.Assignment;
 import com.logistics.shipment.exception.InvalidEventPayloadException;
 import com.logistics.shipment.service.AssignmentService;
+import com.logistics.shipment.service.DeadLetterQueueService;
 import com.logistics.shipment.service.InboxEventService;
 import com.logistics.shipment.validator.OrderEventValidator;
 import io.smallrye.common.annotation.Blocking;
@@ -41,6 +43,9 @@ public class OrderCreatedConsumer {
     @Inject
     ObjectMapper objectMapper;
 
+    @Inject
+    DeadLetterQueueService deadLetterQueueService;
+
     public OrderCreatedConsumer() {
     }
 
@@ -48,16 +53,25 @@ public class OrderCreatedConsumer {
                                 InboxEventService inboxEventService,
                                 OrderEventValidator validator,
                                 ObjectMapper objectMapper) {
+        this(assignmentService, inboxEventService, validator, objectMapper, null);
+    }
+
+    public OrderCreatedConsumer(AssignmentService assignmentService,
+                                InboxEventService inboxEventService,
+                                OrderEventValidator validator,
+                                ObjectMapper objectMapper,
+                                DeadLetterQueueService deadLetterQueueService) {
         this.assignmentService = assignmentService;
         this.inboxEventService = inboxEventService;
         this.validator = validator;
         this.objectMapper = objectMapper;
+        this.deadLetterQueueService = deadLetterQueueService;
     }
 
     public OrderCreatedConsumer(AssignmentService assignmentService,
                                 OrderEventValidator validator,
                                 ObjectMapper objectMapper) {
-        this(assignmentService, null, validator, objectMapper);
+        this(assignmentService, null, validator, objectMapper, null);
     }
 
     @Incoming("order-events")
@@ -75,8 +89,20 @@ public class OrderCreatedConsumer {
             }
             // Acknowledge / commit offset only after successful processing
             return message.ack();
-        } catch (InvalidEventPayloadException e) {
-            log.error("Invalid event payload received, rejecting message without ACK: {}", e.getMessage());
+        } catch (InvalidEventPayloadException | RetryExhaustedException e) {
+            log.error("PB-053: Unprocessable poison message or retry exhausted: {}. Routing to DLQ.", e.getMessage());
+            if (deadLetterQueueService != null) {
+                int attempts = (e instanceof RetryExhaustedException re) ? re.getAttempts() : 1;
+                return deadLetterQueueService.sendToDlq(KafkaTopics.ORDER_EVENTS, rawPayload, e, attempts)
+                        .thenCompose(v -> {
+                            log.warn("PB-053: Message successfully routed to DLQ. Acknowledging original message to prevent infinite retry loop.");
+                            return message.ack();
+                        })
+                        .exceptionallyCompose(dlqErr -> {
+                            log.error("PB-053: Failed to transfer message to DLQ: {}. Preserving original message without ACK.", dlqErr.getMessage());
+                            return message.nack(dlqErr);
+                        });
+            }
             return message.nack(e);
         } catch (Exception e) {
             log.error("Unexpected error processing OrderCreated message, nacking for retry: {}", e.getMessage(), e);

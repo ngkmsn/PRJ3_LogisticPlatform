@@ -157,6 +157,34 @@ class OutboxPublisherServiceTest {
     }
 
     @Test
+    @DisplayName("PB-052: Outbox publisher skips retrying events whose exponential backoff window has not elapsed")
+    void publishPendingEvents_exponentialBackoff_skipsEventUntilBackoffElapses() throws Exception {
+        OutboxEvent event = new OutboxEvent(
+                "evt-backoff-wait",
+                "ORDER",
+                "ord-backoff-wait",
+                "ORDER_CREATED",
+                "{\"orderId\":\"ord-backoff-wait\"}",
+                OutboxStatus.PENDING,
+                2, // Failed twice before
+                "Kafka timeout",
+                Instant.now(), // Occurred just now -> backoff window still active
+                null,
+                Instant.now()
+        );
+
+        when(outboxEventRepository.findPendingEvents(anyInt(), anyInt()))
+                .thenReturn(List.of(event));
+
+        int published = publisherService.publishPendingEvents();
+
+        assertThat(published).isZero();
+        // Must NOT attempt to claim or publish to Kafka
+        verify(outboxEventRepository, never()).claimEventForProcessing("evt-backoff-wait");
+        verify(kafkaOrderEventPublisher, never()).publish(anyString(), anyString(), anyString());
+    }
+
+    @Test
     @DisplayName("PB-023: On startup, recover all lingering PROCESSING events back to PENDING")
     void onStart_recoversProcessingEvents() {
         when(outboxEventRepository.resetAllProcessingEventsToPending()).thenReturn(3);
