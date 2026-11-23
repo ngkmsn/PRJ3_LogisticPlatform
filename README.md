@@ -3590,6 +3590,191 @@ Cung cấp tại API Gateway:
 
 ---
 
+## Task PB-057: Service-to-Service Authentication (Xác Thực Liên Dịch Vụ & Zero-Trust Boundary Security)
+
+Hệ thống Logistics Platform triển khai cơ chế **Xác thực Liên Dịch vụ (Service-to-Service Authentication - S2S Auth)** theo nguyên lý **Zero-Trust Architecture**. Hệ thống loại bỏ hoàn toàn giả định tin tưởng mặc định mọi request xuất phát từ mạng nội bộ hoặc đứng sau API Gateway; thay vào đó, mọi giao tiếp HTTP trực tiếp giữa các microservice (`order-service` ↔ `shipment-service` ↔ `user-service`) đều bắt buộc phải mang Service Identity Token hợp lệ và được kiểm chứng nghiêm ngặt tại boundary tiếp nhận.
+
+### 1. Kiến Trúc Xác Thực Service Identity (S2S Token Architecture)
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                           Caller Service (Client)                               │
+│  (e.g., shipment-service gọi user-service hoặc order-service)                   │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│ 1. ServiceTokenManager:                                                         │
+│    • Tra cứu cached token theo [targetAudience + scopes]                       │
+│    • Nếu cache miss hoặc sắp hết hạn (còn < 30s):                               │
+│      Ký JWT mới (ServiceTokenProvider) với secret nội bộ                        │
+│    • Đính kèm token vào Header: Authorization: Bearer eyJh...                  │
+│    • Log an toàn: Mask token [eyJh...***] — tuyệt đối không làm lộ credentials  │
+└──────────────────────────────────────┬──────────────────────────────────────────┘
+                                       │ HTTP Request + Bearer Service Token
+                                       ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                          Receiver Service (Boundary)                            │
+│  (e.g., user-service tại /api/drivers hoặc order-service tại /api/orders/metrics)│
+├─────────────────────────────────────────────────────────────────────────────────┤
+│ 2. ServiceTokenValidator:                                                       │
+│    • Bước 1: Kiểm tra định dạng Bearer & Chữ ký HMAC-SHA256 (Primary Key)      │
+│      (Nếu thất bại: Fallback thử Secondary Rotation Key cho Zero-Downtime)       │
+│    • Bước 2: Kiểm tra thời hạn hiệu lực (exp > now)                             │
+│    • Bước 3: Kiểm tra Issuer & Service Identity (role: SERVICE, subject != null) │
+│    • Bước 4: Kiểm tra Audience Khớp Chính Xác (aud == currentServiceId)         │
+│    • Bước 5: Kiểm tra Phạm Vi Ủy Quyền (Scopes chứa required scope / wildcard *)│
+│ 3. Phân Phối Quyền / Xử Lý Lỗi:                                                │
+│    • Thiếu / Sai / Hết hạn token   ──► HTTP 401 Unauthorized                    │
+│    • Sai Audience / Thiếu Scope    ──► HTTP 403 Forbidden                       │
+│    • Hợp lệ                        ──► Thực thi nghiệp vụ an toàn               │
+└─────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 2. Đặc Tả Claims của Service Identity Token (`ServiceTokenClaims`)
+
+Dựa trên chuẩn JWT và nguyên lý OAuth2 Client Credentials, token S2S mang đầy đủ thông tin định danh và phân quyền máy (machine identity):
+
+| Claim | Kiểu | Ý Nghĩa & Ràng Buộc Nghiệp Vụ |
+|---|---|---|
+| `iss` | `String` | Issuer của token, mặc định mang giá trị service ID của caller (e.g. `order-service`, `shipment-service`). |
+| `sub` | `String` | Caller Identity / Subject (e.g. `shipment-service`). |
+| `aud` | `String` / `List` | **Target Audience bắt buộc**: Định danh dịch vụ đích tiếp nhận (e.g. `user-service`, `shipment-service`). Ngăn chặn token replay sang dịch vụ khác. |
+| `serviceId` | `String` | Định danh định lượng của service phát hành. |
+| `role` | `String` | Cố định là **`SERVICE`**. Tách biệt 100% với các Role người dùng (`ADMIN`, `DISPATCHER`, `DRIVER`, `CUSTOMER`), không thể dùng lẫn lộn. |
+| `scopes` | `List<String>` | Danh sách quyền tối thiểu (**Least Privilege**), e.g. `driver:read`, `driver:metrics:read`, `shipment:tracking:read`, `order:metrics:read`. |
+| `exp` | `NumericDate` | Hạn hiệu lực ngắn (**Short-Lived TTL**, mặc định 300 giây = 5 phút). |
+| `iat` | `NumericDate` | Thời điểm phát hành token. |
+| `jti` | `UUID` | JWT ID duy nhất chống lặp và chống replay attack. |
+
+> [!IMPORTANT]
+> **Không sử dụng hoặc forward tùy tiện Access Token của Customer / Driver**: Hệ thống tuyệt đối không dùng lại token của người dùng cuối cho các luồng gọi liên dịch vụ nội bộ nền tảng. Service identity token hoàn toàn độc lập, có audience và scope riêng biệt.
+
+### 3. Tối Ưu Client-Side Caching & Tự Động Gia Hạn (`ServiceTokenManager`)
+
+- **Loại Bỏ Overhead Ký JWT**: Thay vì ký một JWT mới trên mỗi request HTTP (gây tốn CPU với HMAC-SHA256), `ServiceTokenManager` duy trì bộ nhớ đệm `ConcurrentHashMap<String, CachedToken>` an toàn đa luồng.
+- **Tự Động Gia Hạn Trước Hạn (Proactive Auto-Renewal)**:
+  - Token được lưu giữ trong cache kèm thời điểm hết hạn `expiresAt`.
+  - Nếu token còn hạn nhiều hơn `refreshThresholdSeconds` (mặc định 30 giây), cache được tái sử dụng ngay lập tức (zero latency).
+  - Khi token bước vào vùng đệm 30 giây cuối cùng trước khi hết hạn, `ServiceTokenManager` chủ động ký mới và cập nhật cache, đảm bảo các request liên dịch vụ không bao giờ bị từ chối vì token hết hạn giữa chừng.
+
+### 4. Cơ Chế Xoay Vòng Khóa Không Gián Đoạn (Zero-Downtime Secret Rotation)
+
+`ServiceTokenValidator` hỗ trợ kiến trúc **Dual-Key Validation**:
+- **`primarySecret`**: Khóa bí mật chính đang sử dụng. Tất cả token mới xuất xưởng sẽ được ký bằng khóa này.
+- **`rotationSecret`** (Secondary): Khóa bí mật cũ đang trong chu kỳ xoay vòng. Khi xác thực chữ ký token nhận được, nếu kiểm tra bằng primary thất bại (do caller chưa kịp reload cấu hình), validator sẽ tự động thử lại với secondary secret.
+- Điều này cho phép DevOps xoay vòng secret trên toàn cluster từng service một mà không gây ra bất kỳ lỗi 401 Unauthorized nào trong thời gian triển khai.
+
+### 5. Kiểm Soát Biên Giới Dịch Vụ & Least Privilege Scopes
+
+Hệ thống thiết lập phân quyền chi tiết cho từng luồng gọi liên dịch vụ:
+
+| Caller Service | Target Service | Scopes Ủy Quyền | Mục Đích Tác Vụ |
+|---|---|---|---|
+| `order-service` | `shipment-service` | `shipment:tracking:read`, `shipment:read` | Tra cứu hành trình đơn hàng phục vụ chi tiết Order |
+| `shipment-service` | `user-service` | `driver:read`, `driver:metrics:read` | Lấy hồ sơ tài xế và kiểm tra độ sẵn sàng phân công đơn |
+| `shipment-service` | `order-service` | `order:metrics:read` | Tổng hợp chỉ số vận hành Dashboard Operations |
+
+- **Phân Biệt Endpoint Hai Chiều (Dual-Auth Endpoints)**: Các API như `/api/orders/metrics`, `/drivers`, `/tracking/orders/{id}` có thể phục vụ cả Admin/Dispatcher qua Gateway (User JWT) và các microservice khác (Service JWT). Boundary tự động nhận diện claim `role == SERVICE` để áp dụng kiểm tra `audience` và `scope` tương ứng.
+- **Bảo Toàn Các Luồng Nội Bộ**: Các luồng Health Check (`/q/health`), Kafka Consumer, Database Migration và Scheduled Task tiếp tục hoạt động trơn tru không bị gián đoạn.
+
+### 6. Cấu Hình Linh Hoạt (`application.properties`)
+
+```properties
+# Service Identity & Calling Configuration
+security.service.id=shipment-service
+security.jwt.service.secret=${SECURITY_JWT_SERVICE_SECRET:default-service-secret-do-not-use-in-prod-must-be-at-least-32-chars!}
+security.jwt.service.rotation-secret=${SECURITY_JWT_SERVICE_ROTATION_SECRET:}
+security.jwt.service.issuer=shipment-service
+security.jwt.service.ttl-seconds=300
+
+# Audience & Validation Settings
+# Mỗi service chỉ chấp nhận token có claim 'aud' chứa chính service id của nó
+security.jwt.service.expected-audience=shipment-service
+```
+
+---
+
+## Task PB-058: Authorization theo Service Boundary (Zero-Trust Data Ownership & IDOR Protection)
+
+Trong kiến trúc Microservices phân tán, việc chỉ dựa vào API Gateway hoặc frontend để kiểm tra quyền truy cập tiềm ẩn rủi ro bảo mật nghiêm trọng (như lỗ hổng **Insecure Direct Object References - IDOR**, bypass Gateway qua mạng nội bộ, hoặc leo thang đặc quyền ngang/dọc giữa các người dùng).  
+Task **PB-058** thiết lập cơ chế **Authorization độc lập tại từng Service Boundary** theo nguyên lý **Zero-Trust**: mỗi microservice (`user-service`, `order-service`, `shipment-service`, `notification-service`) tự chịu trách nhiệm kiểm tra danh tính, quyền hạn (RBAC) và tính sở hữu tài nguyên (Data Ownership) trước khi cho phép đọc hoặc chỉnh sửa bất kỳ thực thể nào.
+
+### 1. Phân Định Rõ Ràng: Authentication (401) vs Authorization (403)
+
+Hệ thống phân tách triệt để giữa lỗi định danh và lỗi quyền hạn theo chuẩn RFC:
+
+```
+                  ┌─────────────────────────────────────────────────────────┐
+                  │                 Incoming HTTP Request                   │
+                  └────────────────────────────┬────────────────────────────┘
+                                               │
+                       ┌───────────────────────▼───────────────────────┐
+                       │  Bước 1: Authentication Check (Caller là ai?) │
+                       └───────────────────────┬───────────────────────┘
+                                               │
+                        Token thiếu / Hết hạn / Chữ ký không hợp lệ?
+                                               ├───► Có  ──► HTTP 401 Unauthorized
+                                               │             (AUTH_UNAUTHORIZED)
+                                               ▼ Không
+                       ┌───────────────────────────────────────────────┐
+                       │  Bước 2: Authorization Check (Được làm gì?)   │
+                       └───────────────────────┬───────────────────────┘
+                                               │
+                    Sai Role / Thiếu Permission / Sai S2S Scope /
+                    Vi phạm Ownership (IDOR trên Order, Driver, GPS)?
+                                               ├───► Có  ──► HTTP 403 Forbidden
+                                               │             (AUTH_ACCESS_DENIED)
+                                               ▼ Không
+                       ┌───────────────────────────────────────────────┐
+                       │  Bước 3: Thực thi Business Logic an toàn      │
+                       └───────────────────────────────────────────────┘
+```
+
+- **HTTP 401 Unauthorized (`AUTH_UNAUTHORIZED`)**: Phát sinh khi caller không cung cấp Authorization header, token không đúng chuẩn Bearer, JWT hết hạn, hoặc chữ ký bị giả mạo / không thể giải mã.
+- **HTTP 403 Forbidden (`AUTH_ACCESS_DENIED`)**: Phát sinh khi caller đã xác thực danh tính thành công nhưng không có quyền thực hiện tác vụ (thiếu vai trò quản trị, thiếu scope liên dịch vụ, hoặc cố tình truy cập tài nguyên của người dùng khác).
+
+### 2. Mô Hình Kiểm Soát Tính Sở Hữu Dữ Liệu (Resource Ownership & Anti-IDOR)
+
+Mỗi microservice tự áp dụng các quy tắc kiểm soát quyền sở hữu nghiêm ngặt tại tầng Service/Domain:
+
+#### A. Customer Boundary (`order-service`)
+- **Tạo đơn hàng (`POST /api/orders`)**: `customerId` được gán cứng từ trường `principal.getUserId()` sau khi giải mã token JWT. Hệ thống **tuyệt đối không tin cậy** tham số `customerId` gửi lên từ body/request payload.
+- **Xem danh sách đơn (`GET /api/orders`)**: Truy vấn dữ liệu tự động gắn điều kiện `WHERE customer_id = :userId`. Customer không bao giờ nhìn thấy đơn hàng của khách hàng khác.
+- **Xem chi tiết & Tracking đơn hàng (`GET /api/orders/{id}`, `/tracking`)**: Kiểm tra `order.getCustomerId().equals(principal.getUserId())`. Nếu Customer A cố tình thay đổi `{id}` trên URL sang ID đơn hàng của Customer B, hệ thống từ chối ngay lập tức với **HTTP 403 Forbidden**.
+- **Hủy đơn hàng (`POST /api/orders/{id}/cancel`)**: Chỉ người tạo đơn (hoặc Admin/Dispatcher) mới được phép kích hoạt hủy đơn, và chỉ khi đơn ở trạng thái hợp lệ (`PENDING`).
+- **Xem lịch sử đơn hàng (`GET /api/orders/{id}/history`)**: Phải là chủ sở hữu đơn hoặc nhân viên Operations (`ADMIN`/`DISPATCHER`). Tài xế hoặc người lạ bị từ chối 403.
+
+#### B. Driver Boundary (`shipment-service` & `user-service`)
+- **Chống IDOR giữa các tài xế**: Tài xế chỉ được xem danh sách shipment được phân công đích danh cho mình (`assigned_driver_id = :driverId`).
+- **Thao tác vòng đời giao nhận**: Các thao tác nhận hàng (`confirmPickup`), vận chuyển (`startTransit`), giao thành công (`confirmDelivery`), và báo thất bại (`reportDeliveryFailure`) bắt buộc phải kiểm tra `shipment.getAssignedDriverId().equals(principal.getUserId())`. Tài xế khác hoặc Customer cố tình can thiệp sẽ nhận **HTTP 403 Forbidden**.
+- **Cập nhật tọa độ GPS (`POST /tracking/location`)**: Định danh `driverId` lấy trực tiếp từ `principal.getUserId()`, ngăn chặn tài xế mạo danh tọa độ của tài xế khác.
+- **Bảo vệ tọa độ thời gian thực (`GET /tracking/drivers/{driverId}/location`)**: Customer bị cấm truy cập trực tiếp tọa độ của tài xế lạ (Customer chỉ được theo dõi vị trí qua lộ trình đơn hàng đang giao của mình tại `/tracking/orders/{orderId}`). Tài xế cũng không thể soi tọa độ của tài xế khác. Chỉ `ADMIN`, `DISPATCHER` hoặc Service S2S hợp lệ mới được truy xuất.
+- **Hồ sơ cá nhân & Availability (`user-service`)**: Tài xế chỉ được cập nhật trạng thái hoạt động (`AVAILABLE` / `UNAVAILABLE`) và thông tin của chính mình.
+
+#### C. Operations Boundary (`ADMIN`, `DISPATCHER`)
+- Nắm giữ các quyền quản trị và điều phối vận hành: manual assign, reassign, xem danh sách đơn chưa gán / đơn thất bại, xem bản đồ điều phối tổng thể, xem hồ sơ tất cả tài xế.
+- Người dùng mang role `CUSTOMER` hoặc `DRIVER` cố tình gọi các endpoint này sẽ bị từ chối **HTTP 403 Forbidden**.
+
+#### D. Service-to-Service Boundary (Least Privilege Machine Access)
+- Microservice gọi sang dịch vụ khác phải sử dụng Service Identity Token có `role: SERVICE`.
+- Service tiếp nhận bắt buộc kiểm tra:
+  1. `aud` (Audience) phải khớp với định danh của service tiếp nhận (ví dụ `order-service`, `shipment-service`, `user-service`).
+  2. `scopes` phải chứa scope tối thiểu cần thiết cho tác vụ (e.g. `order:read`, `driver:read`, `shipment:tracking:read`).
+  3. Nếu token sai audience hoặc thiếu scope phù hợp, hệ thống lập tức từ chối với **HTTP 403 Forbidden**.
+
+### 3. Thành Phần Cốt Lõi Triển Khai
+
+| Module | Lớp / Thành Phần | Vai Trò & Chức Năng |
+|---|---|---|
+| `common-lib` | `ServiceBoundaryAuthorizer` | Bộ thư viện tiện ích tập trung dùng chung cho toàn bộ microservice: `requireAuthenticated`, `requireCustomerOwnership`, `requireDriverOwnership`, `requireOperationsOrAdmin`, `requireRole`, `requirePermission`, `requireServiceScope`, `requireUserPermissionOrServiceScope`. |
+| `common-lib` | `AccessDeniedException` | Exception chuyên biệt (mã lỗi `AUTH_ACCESS_DENIED`, status 403), được Global Exception Handler tại tất cả service chuyển thành `ApiResponse` chuẩn. |
+| `common-lib` | `BadCredentialsException` | Exception chuyên biệt (mã lỗi `AUTH_UNAUTHORIZED`, status 401), xử lý các trường hợp thiếu hoặc sai token. |
+| `common-lib` | `AuthPrincipal` | Bổ sung các phương thức kiểm tra tiện lợi: `isOperations()`, `isCustomer()`, `isDriver()`, `canAccessCustomerResource()`, `canAccessDriverResource()`. |
+| `order-service` | `OrderService` | Kiểm tra quyền sở hữu Customer trên mọi endpoint xem chi tiết, danh sách, lịch sử, hủy đơn và cập nhật trạng thái; hỗ trợ Service Caller an toàn. |
+| `shipment-service` | `DefaultTrackingService` & `DefaultAssignmentService` | Chặn Customer và Driver khác soi GPS của tài xế; khóa quyền thao tác shipment chỉ cho tài xế được phân công; kiểm soát phân quyền điều phối Operations. |
+| `shipment-service` | `MapController` & `TrackingController` | Kiểm tra tính sở hữu đơn hàng trước khi cung cấp chỉ đường (routing directions) và tracking map. |
+| `user-service` | `DriverService` & `UserService` | Đảm bảo tài xế chỉ sửa availability của chính mình; chặn Customer và Driver truy cập danh sách tài xế toàn hệ thống. |
+
+---
+
 ## Roadmap
 
 | PB Item | Scope | Status |
@@ -3650,6 +3835,8 @@ Cung cấp tại API Gateway:
 | **PB-054** | Circuit Breaker: Bảo vệ tài nguyên với 3 trạng thái CLOSED/OPEN/HALF-OPEN, phân loại transient error, short-circuit, fallback & REST observability | ✅ Completed |
 | **PB-055** | Rate Limiting: Giới hạn lưu lượng phân tầng (Inbound Gateway & Event Token Bucket), phân tán Redis 7, In-Memory sliding window, HTTP 429, Retry-After & telemetry | ✅ Completed |
 | **PB-056** | Backpressure: Tự điều tiết tốc độ với máy trạng thái NORMAL/THROTTLED/SHEDDING, bounded concurrency, EWMA latency, pacing delay, load shedding & telemetry | ✅ Completed |
+| **PB-057** | Service-to-Service Authentication: JWT Service Identity, least privilege scopes, token caching/renewal, zero-downtime key rotation, boundary enforcement & log masking | ✅ Completed |
+| **PB-058** | Authorization theo Service Boundary: Tự kiểm tra quyền & ownership tại từng microservice, chống IDOR, Zero-Trust backend, phân định 401 vs 403, S2S least privilege | ✅ Completed |
 
 
 

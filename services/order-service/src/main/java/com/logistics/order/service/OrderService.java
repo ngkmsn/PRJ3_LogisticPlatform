@@ -181,7 +181,35 @@ public class OrderService {
     }
 
     public OrderDto getOrderDetails(String authHeader, String orderIdentifier) {
-        AuthPrincipal customer = resolveAuthenticatedCustomer(authHeader, "view order details");
+        if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+            log.warn("Authentication failed: missing or invalid Authorization header");
+            throw new BadCredentialsException("Missing or invalid Authorization header");
+        }
+
+        String token = authHeader.substring(7).trim();
+        if (!jwtTokenProvider.validateToken(token)) {
+            log.warn("Authentication failed: token is invalid or expired");
+            throw new BadCredentialsException("Token is invalid or expired");
+        }
+
+        AuthPrincipal principal = AuthPrincipal.fromJwtToken(token, jwtTokenProvider);
+        if (principal == null) {
+            throw new BadCredentialsException("Token identity could not be verified");
+        }
+
+        if (principal.isService()) {
+            if (!principal.hasAudience("order-service")) {
+                log.warn("PB-057/PB-058: Service token audience mismatch: expected 'order-service' but got {}", principal.getAudiences());
+                throw new AccessDeniedException("Invalid token audience: expected order-service");
+            }
+            if (!principal.hasScope("order:read") && !principal.hasScope("service:call")) {
+                log.warn("PB-057/PB-058: Service '{}' lacks required scope 'order:read'", principal.getServiceId());
+                throw new AccessDeniedException("Insufficient service permissions: required scope order:read");
+            }
+        } else if (principal.getRole() != Role.CUSTOMER) {
+            log.warn("Access denied: caller role '{}' is not CUSTOMER for view order details", principal.getRole());
+            throw new AccessDeniedException("Access denied: Only customers are permitted to view order details");
+        }
 
         if (orderIdentifier == null || orderIdentifier.isBlank()) {
             throw new IllegalArgumentException("Order identifier cannot be empty");
@@ -193,15 +221,15 @@ public class OrderService {
                     return new OrderNotFoundException("Order not found with identifier: " + orderIdentifier);
                 });
 
-        // Strict ownership check: Must belong to the authenticated customer
-        if (!customer.getUserId().equals(order.getCustomerId())) {
+        // Strict ownership check: Must belong to the authenticated customer (if human customer)
+        if (principal.getRole() == Role.CUSTOMER && !principal.getUserId().equals(order.getCustomerId())) {
             log.warn("Access denied: Customer '{}' attempted to access order '{}' belonging to customer '{}'",
-                    customer.getUserId(), order.getId(), order.getCustomerId());
+                    principal.getUserId(), order.getId(), order.getCustomerId());
             throw new AccessDeniedException("Access denied: You do not have permission to view this order");
         }
 
-        log.info("Customer '{}' successfully retrieved order details for orderId='{}', orderNumber='{}'",
-                customer.getUserId(), order.getId(), order.getOrderNumber());
+        log.info("Caller '{}' successfully retrieved order details for orderId='{}', orderNumber='{}'",
+                principal.getUserId(), order.getId(), order.getOrderNumber());
 
         return OrderDto.from(order);
     }
@@ -405,11 +433,26 @@ public class OrderService {
                     return new OrderNotFoundException("Order not found with identifier: " + orderIdentifier);
                 });
 
-        // Strict ownership check for CUSTOMER
-        if (principal.getRole() == Role.CUSTOMER && !principal.getUserId().equals(order.getCustomerId())) {
-            log.warn("Access denied: Customer '{}' attempted to view history of order '{}' belonging to customer '{}'",
-                    principal.getUserId(), order.getId(), order.getCustomerId());
-            throw new AccessDeniedException("Access denied: You do not have permission to view history for this order");
+        // Authorization and strict ownership check
+        if (principal.isService()) {
+            if (!principal.hasAudience("order-service")) {
+                log.warn("PB-057/PB-058: Service token audience mismatch: expected 'order-service' but got {}", principal.getAudiences());
+                throw new AccessDeniedException("Invalid token audience: expected order-service");
+            }
+            if (!principal.hasScope("order:read") && !principal.hasScope("order:history:read") && !principal.hasScope("service:call")) {
+                log.warn("PB-057/PB-058: Service '{}' lacks required scope. Granted scopes: {}", principal.getServiceId(), principal.getScopes());
+                throw new AccessDeniedException("Insufficient service permissions: required scope order:read or order:history:read");
+            }
+        } else if (principal.getRole() == Role.CUSTOMER) {
+            if (!principal.getUserId().equals(order.getCustomerId())) {
+                log.warn("Access denied: Customer '{}' attempted to view history of order '{}' belonging to customer '{}'",
+                        principal.getUserId(), order.getId(), order.getCustomerId());
+                throw new AccessDeniedException("Access denied: You do not have permission to view history for this order");
+            }
+        } else if (principal.getRole() != Role.ADMIN && principal.getRole() != Role.DISPATCHER) {
+            log.warn("Access denied: Caller role '{}' is not permitted to view history for order '{}'",
+                    principal.getRole(), order.getId());
+            throw new AccessDeniedException("Access denied: Role '" + principal.getRole() + "' is not permitted to view order history");
         }
 
         List<OrderStatusHistory> histories;
@@ -550,11 +593,26 @@ public class OrderService {
                     return new OrderNotFoundException("Order not found with identifier: " + trimmedIdentifier);
                 });
 
-        // Strict ownership check for CUSTOMER
-        if (principal.getRole() == Role.CUSTOMER && !principal.getUserId().equals(order.getCustomerId())) {
-            log.warn("Access denied: Customer '{}' attempted to view tracking of order '{}' belonging to customer '{}'",
-                    principal.getUserId(), order.getId(), order.getCustomerId());
-            throw new AccessDeniedException("Access denied: You do not have permission to view tracking for this order");
+        // Authorization and strict ownership check
+        if (principal.isService()) {
+            if (!principal.hasAudience("order-service")) {
+                log.warn("PB-057/PB-058: Service token audience mismatch: expected 'order-service' but got {}", principal.getAudiences());
+                throw new AccessDeniedException("Invalid token audience: expected order-service");
+            }
+            if (!principal.hasScope("order:read") && !principal.hasScope("shipment:tracking:read") && !principal.hasScope("service:call")) {
+                log.warn("PB-057/PB-058: Service '{}' lacks required scope. Granted scopes: {}", principal.getServiceId(), principal.getScopes());
+                throw new AccessDeniedException("Insufficient service permissions: required scope order:read or shipment:tracking:read");
+            }
+        } else if (principal.getRole() == Role.CUSTOMER) {
+            if (!principal.getUserId().equals(order.getCustomerId())) {
+                log.warn("Access denied: Customer '{}' attempted to view tracking of order '{}' belonging to customer '{}'",
+                        principal.getUserId(), order.getId(), order.getCustomerId());
+                throw new AccessDeniedException("Access denied: You do not have permission to view tracking for this order");
+            }
+        } else if (principal.getRole() != Role.ADMIN && principal.getRole() != Role.DISPATCHER) {
+            log.warn("Access denied: Caller role '{}' is not permitted to view tracking for order '{}'",
+                    principal.getRole(), order.getId());
+            throw new AccessDeniedException("Access denied: Role '" + principal.getRole() + "' is not permitted to view order tracking");
         }
 
         // State check: Order must be in trackable state (ASSIGNED or IN_TRANSIT)
@@ -586,7 +644,20 @@ public class OrderService {
             throw new BadCredentialsException("Invalid or expired token");
         }
         AuthPrincipal principal = AuthPrincipal.fromJwtToken(token, jwtTokenProvider);
-        if (principal == null || (principal.getRole() != Role.DISPATCHER && principal.getRole() != Role.ADMIN)) {
+        if (principal == null) {
+            throw new BadCredentialsException("Invalid or expired token");
+        }
+
+        if (principal.isService()) {
+            if (!principal.hasAudience("order-service")) {
+                log.warn("PB-057: Service token audience mismatch: expected 'order-service' but got {}", principal.getAudiences());
+                throw new AccessDeniedException("Invalid token audience: expected order-service");
+            }
+            if (!principal.hasScope("order:metrics:read") && !principal.hasScope("order:read") && !principal.hasScope("service:call")) {
+                log.warn("PB-057: Service '{}' lacks required scope. Granted scopes: {}", principal.getServiceId(), principal.getScopes());
+                throw new AccessDeniedException("Insufficient service permissions: required scope order:metrics:read");
+            }
+        } else if (principal.getRole() != Role.DISPATCHER && principal.getRole() != Role.ADMIN) {
             throw new AccessDeniedException("Access denied: Operations or Admin role required");
         }
 

@@ -526,6 +526,18 @@ public class DefaultAssignmentService implements AssignmentService {
             throw new BadCredentialsException("Token identity could not be verified");
         }
 
+        if (principal.isService()) {
+            if (!principal.hasAudience("shipment-service")) {
+                log.warn("PB-057/PB-058: Service token audience mismatch: expected 'shipment-service' but got {}", principal.getAudiences());
+                throw new AccessDeniedException("Invalid token audience: expected shipment-service");
+            }
+            if (!principal.hasScope("shipment:assign") && !principal.hasScope("shipment:operations:read") && !principal.hasScope("shipment:read") && !principal.hasScope("service:call")) {
+                log.warn("PB-057/PB-058: Service '{}' lacks required scope for {}", principal.getServiceId(), action);
+                throw new AccessDeniedException("Insufficient service permissions: required scope for " + action);
+            }
+            return principal;
+        }
+
         if (principal.getRole() != Role.ADMIN && principal.getRole() != Role.DISPATCHER) {
             log.warn("Access denied: caller role '{}' is not ADMIN or DISPATCHER for {}", principal.getRole(), action);
             throw new AccessDeniedException("Access denied: Only administrators and dispatchers are permitted to " + action);

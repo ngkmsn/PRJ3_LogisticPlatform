@@ -6,8 +6,11 @@ import com.sun.net.httpserver.HttpServer;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.RestAssured;
 import io.restassured.http.ContentType;
+import jakarta.inject.Inject;
+import com.logistics.gateway.ratelimit.GatewayRateLimitHandler;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -227,6 +230,16 @@ class GatewayAuthRoutingIntegrationTest {
         System.clearProperty("ORDER_SERVICE_URL");
         if (mockUserService != null) {
             mockUserService.stop(0);
+        }
+    }
+
+    @Inject
+    GatewayRateLimitHandler gatewayRateLimitHandler;
+
+    @BeforeEach
+    void resetRateLimits() {
+        if (gatewayRateLimitHandler != null && gatewayRateLimitHandler.getRateLimiter() != null) {
+            gatewayRateLimitHandler.getRateLimiter().getStorage().resetAll();
         }
     }
 

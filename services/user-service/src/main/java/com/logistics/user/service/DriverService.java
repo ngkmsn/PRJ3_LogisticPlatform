@@ -1,6 +1,7 @@
 package com.logistics.user.service;
 
 import com.logistics.common.model.DriverAvailability;
+import com.logistics.common.security.AuthPrincipal;
 import com.logistics.common.security.JwtTokenProvider;
 import com.logistics.user.dto.CreateDriverProfileRequest;
 import com.logistics.user.dto.DriverAvailabilityDto;
@@ -78,13 +79,55 @@ public class DriverService {
         return user;
     }
 
-    public PagedResponse<DriverProfileDto> listDrivers(String authHeader, int page, int size, String statusFilter) {
-        User caller = resolveAuthenticatedUser(authHeader);
+    public boolean isServiceCaller(String authHeader) {
+        if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+            return false;
+        }
+        String token = authHeader.substring(7).trim();
+        try {
+            if (jwtTokenProvider != null && jwtTokenProvider.validateToken(token)) {
+                String role = jwtTokenProvider.extractRole(token);
+                return "SERVICE".equalsIgnoreCase(role);
+            }
+        } catch (Exception ignored) {}
+        return false;
+    }
 
-        // Only ADMIN and DISPATCHER can view the list of all drivers
-        if (caller.getRole() != UserRole.ADMIN && caller.getRole() != UserRole.DISPATCHER) {
-            log.warn("Access denied: caller role '{}' cannot list all driver profiles", caller.getRole());
-            throw new AccessDeniedException("Access denied: Administrator or Dispatcher privileges required");
+    public AuthPrincipal validateServiceCaller(String authHeader, String requiredScope) {
+        if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+            throw new BadCredentialsException("Missing or invalid Authorization header");
+        }
+        String token = authHeader.substring(7).trim();
+        if (jwtTokenProvider == null || !jwtTokenProvider.validateToken(token)) {
+            throw new BadCredentialsException("Token is invalid or expired");
+        }
+        AuthPrincipal principal = AuthPrincipal.fromJwtToken(token, jwtTokenProvider);
+        if (principal == null || !principal.isService()) {
+            throw new BadCredentialsException("Token identity not recognized as service");
+        }
+        if (!principal.hasAudience("user-service")) {
+            log.warn("PB-057: Service token audience mismatch: expected 'user-service' but got {}", principal.getAudiences());
+            throw new AccessDeniedException("Invalid token audience: expected user-service");
+        }
+        if (requiredScope != null && !principal.hasScope(requiredScope) && !principal.hasScope("service:call")) {
+            log.warn("PB-057: Service '{}' lacks required scope '{}'. Granted scopes: {}",
+                    principal.getServiceId(), requiredScope, principal.getScopes());
+            throw new AccessDeniedException("Insufficient service permissions: required scope " + requiredScope);
+        }
+        return principal;
+    }
+
+    public PagedResponse<DriverProfileDto> listDrivers(String authHeader, int page, int size, String statusFilter) {
+        if (isServiceCaller(authHeader)) {
+            validateServiceCaller(authHeader, "driver:read");
+        } else {
+            User caller = resolveAuthenticatedUser(authHeader);
+
+            // Only ADMIN and DISPATCHER can view the list of all drivers
+            if (caller.getRole() != UserRole.ADMIN && caller.getRole() != UserRole.DISPATCHER) {
+                log.warn("Access denied: caller role '{}' cannot list all driver profiles", caller.getRole());
+                throw new AccessDeniedException("Access denied: Administrator or Dispatcher privileges required");
+            }
         }
 
         int pageIndex = Math.max(0, page);
@@ -113,6 +156,13 @@ public class DriverService {
     }
 
     public DriverProfileDto getDriverById(String authHeader, String id) {
+        if (isServiceCaller(authHeader)) {
+            validateServiceCaller(authHeader, "driver:read");
+            DriverProfile profile = findDriverProfileByIdOrUserId(id);
+            User driverUser = userRepository.findByIdOptional(profile.getUserId()).orElse(null);
+            return DriverProfileDto.from(profile, driverUser);
+        }
+
         User caller = resolveAuthenticatedUser(authHeader);
 
         if (caller.getRole() == UserRole.CUSTOMER) {
@@ -361,11 +411,15 @@ public class DriverService {
     }
 
     public com.logistics.common.dto.DriverOperationalMetricsDto getDriverOperationalMetrics(String authHeader) {
-        User caller = resolveAuthenticatedUser(authHeader);
+        if (isServiceCaller(authHeader)) {
+            validateServiceCaller(authHeader, "driver:metrics:read");
+        } else {
+            User caller = resolveAuthenticatedUser(authHeader);
 
-        if (caller.getRole() != UserRole.ADMIN && caller.getRole() != UserRole.DISPATCHER) {
-            log.warn("Access denied: caller role '{}' cannot view driver operational metrics", caller.getRole());
-            throw new AccessDeniedException("Access denied: Administrator or Dispatcher privileges required");
+            if (caller.getRole() != UserRole.ADMIN && caller.getRole() != UserRole.DISPATCHER) {
+                log.warn("Access denied: caller role '{}' cannot view driver operational metrics", caller.getRole());
+                throw new AccessDeniedException("Access denied: Administrator or Dispatcher privileges required");
+            }
         }
 
         com.logistics.common.dto.DriverOperationalMetricsDto dto = new com.logistics.common.dto.DriverOperationalMetricsDto();

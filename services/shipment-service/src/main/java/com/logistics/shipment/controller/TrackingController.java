@@ -84,13 +84,66 @@ public class TrackingController {
     @Inject
     com.logistics.shipment.map.service.MapService mapService;
 
+    @Inject
+    com.logistics.shipment.repository.AssignmentRepository assignmentRepository;
+
+    @Inject
+    com.logistics.common.security.JwtTokenProvider jwtTokenProvider;
+
     @GET
     @Path("/orders/{orderId}/directions")
     public Response getOrderDirections(
             @HeaderParam("Authorization") String authHeader,
             @PathParam("orderId") String orderId) {
+        if (authHeader != null && authHeader.startsWith("Bearer ")) {
+            validateOrderAccess(authHeader, orderId);
+        }
         com.logistics.common.dto.RouteDirectionResponse directions = mapService.getOrderDirections(orderId);
         return Response.ok(ApiResponse.ok("Order directions calculated successfully", directions)).build();
+    }
+
+    private void validateOrderAccess(String authHeader, String orderId) {
+        if (jwtTokenProvider == null || assignmentRepository == null || orderId == null) {
+            return;
+        }
+        String token = authHeader.substring(7).trim();
+        if (!jwtTokenProvider.validateToken(token)) {
+            throw new com.logistics.shipment.exception.BadCredentialsException("Token is invalid or expired");
+        }
+        com.logistics.common.security.AuthPrincipal principal = com.logistics.common.security.AuthPrincipal.fromJwtToken(token, jwtTokenProvider);
+        if (principal == null) {
+            throw new com.logistics.shipment.exception.BadCredentialsException("Token identity could not be verified");
+        }
+
+        if (principal.isService()) {
+            if (!principal.hasAudience("shipment-service")) {
+                throw new com.logistics.shipment.exception.AccessDeniedException("Invalid token audience: expected shipment-service");
+            }
+            if (!principal.hasScope("shipment:read") && !principal.hasScope("shipment:tracking:read") && !principal.hasScope("service:call")) {
+                throw new com.logistics.shipment.exception.AccessDeniedException("Insufficient service permissions: required scope shipment:read or shipment:tracking:read");
+            }
+            return;
+        }
+
+        if (principal.getRole() == com.logistics.common.security.Role.ADMIN || principal.getRole() == com.logistics.common.security.Role.DISPATCHER) {
+            return;
+        }
+
+        com.logistics.shipment.entity.Assignment assignment = assignmentRepository.findByOrderId(orderId.trim()).orElse(null);
+        if (assignment == null) {
+            return;
+        }
+
+        if (principal.getRole() == com.logistics.common.security.Role.CUSTOMER) {
+            if (!principal.getUserId().equals(assignment.getCustomerId())) {
+                throw new com.logistics.shipment.exception.AccessDeniedException("Access denied: You do not own this order");
+            }
+        } else if (principal.getRole() == com.logistics.common.security.Role.DRIVER) {
+            boolean isAssigned = (assignment.getDriverId() != null && assignment.getDriverId().equalsIgnoreCase(principal.getUserId()));
+            if (!isAssigned) {
+                throw new com.logistics.shipment.exception.AccessDeniedException("Access denied: You are not the assigned driver for this order");
+            }
+        }
     }
 
     @GET

@@ -4,7 +4,8 @@ public enum Role {
     ADMIN,
     DISPATCHER,
     DRIVER,
-    CUSTOMER;
+    CUSTOMER,
+    SERVICE;
 
     public static Role fromString(String role) {
         if (role == null || role.isBlank()) {

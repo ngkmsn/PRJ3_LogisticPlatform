@@ -4,6 +4,8 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.logistics.common.dto.ApiResponse;
 import com.logistics.common.dto.OrderTrackingDto;
+import com.logistics.common.security.ServiceTokenManager;
+import com.logistics.common.security.ServiceTokenProvider;
 import com.logistics.order.exception.AccessDeniedException;
 import com.logistics.order.exception.OrderNotFoundException;
 import com.logistics.order.exception.TrackingServiceUnavailableException;
@@ -33,7 +35,14 @@ public class DefaultTrackingServiceClient implements TrackingServiceClient {
     @Inject
     ObjectMapper objectMapper;
 
+    @Inject
+    ServiceTokenManager serviceTokenManager;
+
     private HttpClient httpClient;
+
+    public void setServiceTokenManager(ServiceTokenManager serviceTokenManager) {
+        this.serviceTokenManager = serviceTokenManager;
+    }
 
     @PostConstruct
     void init() {
@@ -68,8 +77,17 @@ public class DefaultTrackingServiceClient implements TrackingServiceClient {
                 .header("Accept", "application/json")
                 .GET();
 
-        if (authHeader != null && !authHeader.isBlank()) {
-            requestBuilder.header("Authorization", authHeader);
+        String effectiveAuth = null;
+        if (serviceTokenManager != null) {
+            String token = serviceTokenManager.getServiceToken("shipment-service", java.util.Set.of("shipment:tracking:read", "shipment:read"));
+            effectiveAuth = "Bearer " + token;
+            log.debug("DefaultTrackingServiceClient: attached service token: {}", ServiceTokenProvider.maskToken(effectiveAuth));
+        } else if (authHeader != null && !authHeader.isBlank()) {
+            effectiveAuth = authHeader;
+        }
+
+        if (effectiveAuth != null && !effectiveAuth.isBlank()) {
+            requestBuilder.header("Authorization", effectiveAuth);
         }
 
         try {

@@ -243,6 +243,7 @@ public class UserService {
         requireAdmin(authHeader);
 
         return Arrays.stream(Role.values())
+                .filter(r -> r != Role.SERVICE)
                 .map(RoleInfoDto::fromRole)
                 .toList();
     }

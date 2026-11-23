@@ -3,6 +3,8 @@ package com.logistics.shipment.dashboard.client;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.logistics.common.dto.OrderMetricsDto;
+import com.logistics.common.security.ServiceTokenManager;
+import com.logistics.common.security.ServiceTokenProvider;
 import io.quarkus.arc.DefaultBean;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -29,7 +31,14 @@ public class DefaultOrderMetricsClient implements OrderMetricsClient {
     @Inject
     ObjectMapper objectMapper;
 
+    @Inject
+    ServiceTokenManager serviceTokenManager;
+
     private HttpClient httpClient;
+
+    public void setServiceTokenManager(ServiceTokenManager serviceTokenManager) {
+        this.serviceTokenManager = serviceTokenManager;
+    }
 
     public DefaultOrderMetricsClient() {
         this.httpClient = HttpClient.newBuilder()
@@ -59,8 +68,17 @@ public class DefaultOrderMetricsClient implements OrderMetricsClient {
                     .header("Accept", "application/json")
                     .GET();
 
-            if (authHeader != null && !authHeader.isBlank()) {
-                reqBuilder.header("Authorization", authHeader);
+            String effectiveAuth = null;
+            if (serviceTokenManager != null) {
+                String token = serviceTokenManager.getServiceToken("order-service", java.util.Set.of("order:metrics:read"));
+                effectiveAuth = "Bearer " + token;
+                log.debug("DefaultOrderMetricsClient: attached service token: {}", ServiceTokenProvider.maskToken(effectiveAuth));
+            } else if (authHeader != null && !authHeader.isBlank()) {
+                effectiveAuth = authHeader;
+            }
+
+            if (effectiveAuth != null && !effectiveAuth.isBlank()) {
+                reqBuilder.header("Authorization", effectiveAuth);
             }
 
             HttpResponse<String> response = httpClient.send(reqBuilder.build(), HttpResponse.BodyHandlers.ofString());

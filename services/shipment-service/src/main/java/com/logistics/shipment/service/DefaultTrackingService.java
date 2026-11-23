@@ -189,13 +189,39 @@ public class DefaultTrackingService implements TrackingService {
 
     @Override
     public Optional<DriverLocation> getDriverLocation(String authHeader, String driverId) {
-        resolveAuthenticatedUser(authHeader, "view driver GPS location");
+        AuthPrincipal principal = resolveAuthenticatedUser(authHeader, "view driver GPS location");
 
         if (driverId == null || driverId.trim().isEmpty()) {
             throw new IllegalArgumentException("driverId must not be null or empty");
         }
 
         String targetId = driverId.trim();
+
+        // PB-058 Boundary Authorization & IDOR protection
+        if (principal.isService()) {
+            if (!principal.hasAudience("shipment-service")) {
+                throw new AccessDeniedException("Invalid token audience: expected shipment-service");
+            }
+            if (!principal.hasScope("driver:read") && !principal.hasScope("shipment:read") && !principal.hasScope("service:call")) {
+                throw new AccessDeniedException("Insufficient service permissions: required scope driver:read or shipment:read");
+            }
+        } else if (principal.getRole() == Role.CUSTOMER) {
+            log.warn("PB-058 [IDOR_BLOCKED]: Customer '{}' attempted to view direct GPS location of driver '{}'",
+                    principal.getUserId(), targetId);
+            throw new AccessDeniedException("Access denied: Customers are not permitted to query driver GPS locations directly. Please track via order tracking.");
+        } else if (principal.getRole() == Role.DRIVER) {
+            String callerProfileId = resolveDriverProfileId(principal.getUserId());
+            boolean isSelf = targetId.equalsIgnoreCase(principal.getUserId()) ||
+                    (callerProfileId != null && targetId.equalsIgnoreCase(callerProfileId));
+            if (!isSelf) {
+                log.warn("PB-058 [IDOR_BLOCKED]: Driver '{}' attempted to query GPS location of other driver '{}'",
+                        principal.getUserId(), targetId);
+                throw new AccessDeniedException("Access denied: Drivers may only view their own GPS location");
+            }
+        } else if (principal.getRole() != Role.ADMIN && principal.getRole() != Role.DISPATCHER) {
+            throw new AccessDeniedException("Access denied: Insufficient permissions to view driver GPS location");
+        }
+
         Optional<DriverLocation> location = driverLocationRepository.findByDriverId(targetId);
         if (location.isEmpty()) {
             location = driverLocationRepository.findByUserId(targetId);
@@ -229,6 +255,18 @@ public class DefaultTrackingService implements TrackingService {
         if (principal == null) {
             throw new BadCredentialsException("Token identity could not be verified");
         }
+
+        if (principal.isService()) {
+            if (!principal.hasAudience("shipment-service")) {
+                log.warn("PB-057: Service token audience mismatch: expected 'shipment-service' but had {}", principal.getAudiences());
+                throw new AccessDeniedException("Invalid token audience: expected shipment-service");
+            }
+            if (!principal.hasScope("shipment:tracking:read") && !principal.hasScope("shipment:read") && !principal.hasScope("driver:read") && !principal.hasScope("service:call")) {
+                log.warn("PB-057: Service '{}' lacks required scope. Granted scopes: {}", principal.getServiceId(), principal.getScopes());
+                throw new AccessDeniedException("Insufficient service permissions");
+            }
+        }
+
         return principal;
     }
 

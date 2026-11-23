@@ -3,6 +3,8 @@ package com.logistics.shipment.eligibility.client;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.logistics.common.model.DriverAvailability;
+import com.logistics.common.security.ServiceTokenManager;
+import com.logistics.common.security.ServiceTokenProvider;
 import com.logistics.shipment.eligibility.model.AssignmentCriteria;
 import com.logistics.shipment.eligibility.model.EligibleDriver;
 import com.logistics.shipment.exception.AccessDeniedException;
@@ -39,6 +41,21 @@ public class DefaultDriverClient implements DriverClient {
 
     @Inject
     ObjectMapper objectMapper;
+
+    @Inject
+    ServiceTokenManager serviceTokenManager;
+
+    public void setServiceTokenManager(ServiceTokenManager serviceTokenManager) {
+        this.serviceTokenManager = serviceTokenManager;
+    }
+
+    private String resolveAuthHeader(String fallbackHeader, String targetAudience, java.util.Set<String> scopes) {
+        if (serviceTokenManager != null) {
+            String token = serviceTokenManager.getServiceToken(targetAudience, scopes);
+            return "Bearer " + token;
+        }
+        return fallbackHeader;
+    }
 
     @Override
     public List<EligibleDriver> getCandidateDrivers(AssignmentCriteria criteria) {
@@ -121,8 +138,10 @@ public class DefaultDriverClient implements DriverClient {
                     .header("Accept", "application/json")
                     .GET();
 
-            if (authHeader != null && !authHeader.isBlank()) {
-                reqBuilder.header("Authorization", authHeader);
+            String effectiveAuth = resolveAuthHeader(authHeader, "user-service", java.util.Set.of("driver:metrics:read", "driver:read"));
+            if (effectiveAuth != null && !effectiveAuth.isBlank()) {
+                reqBuilder.header("Authorization", effectiveAuth);
+                log.debug("DefaultDriverClient: attached Authorization header: {}", ServiceTokenProvider.maskToken(effectiveAuth));
             }
 
             HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build();
@@ -190,8 +209,10 @@ public class DefaultDriverClient implements DriverClient {
                     .header("Accept", "application/json")
                     .GET();
 
-            if (authHeader != null && !authHeader.isBlank()) {
-                reqBuilder.header("Authorization", authHeader);
+            String effectiveAuth = resolveAuthHeader(authHeader, "user-service", java.util.Set.of("driver:metrics:read", "driver:read"));
+            if (effectiveAuth != null && !effectiveAuth.isBlank()) {
+                reqBuilder.header("Authorization", effectiveAuth);
+                log.debug("DefaultDriverClient: attached Authorization header: {}", ServiceTokenProvider.maskToken(effectiveAuth));
             }
 
             HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build();

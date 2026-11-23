@@ -129,8 +129,8 @@ class OutboxPublisherIntegrationTest {
     @DisplayName("PB-023: Event transitions to FAILED when maximum retry attempts (5) are reached")
     void publishPendingEvents_maxRetriesExceeded_transitionsToFailed() throws Exception {
         String orderId = "ord-pub-maxretry-" + UUID.randomUUID();
-        // Event already retried 4 times
-        OutboxEvent event = createAndPersistEvent(orderId, OutboxStatus.PENDING, 4, Instant.now());
+        // Event already retried 4 times and past backoff window
+        OutboxEvent event = createAndPersistEvent(orderId, OutboxStatus.PENDING, 4, Instant.now().minus(10, ChronoUnit.MINUTES));
 
         doThrow(new RuntimeException("Continuous Kafka Timeout Error"))
                 .when(kafkaOrderEventPublisher).publish(anyString(), anyString(), anyString());
