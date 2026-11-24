@@ -57,14 +57,55 @@ public class DefaultDriverClient implements DriverClient {
         return fallbackHeader;
     }
 
+    /**
+     * "remote" (default): driver data comes from user-service over REST with a service token.
+     * "stub": offline placeholder data, used by the test profile where user-service is not running.
+     */
+    @ConfigProperty(name = "logistics.driver-client.mode", defaultValue = "remote")
+    String mode = "remote";
+
+    private boolean isStubMode() {
+        return "stub".equalsIgnoreCase(mode);
+    }
+
+    /** Fetches all driver profiles from user-service and attaches each driver's latest GPS location. */
+    private List<EligibleDriver> fetchRemoteDrivers() {
+        List<EligibleDriver> drivers = getAllDrivers(null);
+        for (EligibleDriver driver : drivers) {
+            attachLatestLocation(driver);
+        }
+        return drivers;
+    }
+
+    private void attachLatestLocation(EligibleDriver driver) {
+        if (driverLocationRepository == null) {
+            return;
+        }
+        Optional<com.logistics.shipment.entity.DriverLocation> location =
+                driverLocationRepository.findByDriverId(driver.getDriverId());
+        if (location.isEmpty() && driver.getUserId() != null && !driver.getUserId().isBlank()) {
+            location = driverLocationRepository.findByDriverId(driver.getUserId());
+        }
+        location.ifPresent(loc -> {
+            driver.setCurrentLatitude(loc.getLatitude());
+            driver.setCurrentLongitude(loc.getLongitude());
+            driver.setLocationUpdatedAt(loc.getTimestamp());
+        });
+    }
+
     @Override
     public List<EligibleDriver> getCandidateDrivers(AssignmentCriteria criteria) {
         String orderId = criteria != null ? criteria.getOrderId() : "N/A";
         log.info("DefaultDriverClient: querying driver provider for orderId='{}'", orderId);
 
-        try {
-            // Decoupled boundary: delegates to REST/gRPC client or read model
+        if (isStubMode()) {
             return new ArrayList<>();
+        }
+        try {
+            List<EligibleDriver> drivers = fetchRemoteDrivers();
+            log.info("DefaultDriverClient: retrieved {} candidate drivers from user-service for orderId='{}'",
+                    drivers.size(), orderId);
+            return drivers;
         } catch (Exception e) {
             log.error("DefaultDriverClient: failed to retrieve candidate drivers for orderId '{}': {}",
                     orderId, e.getMessage(), e);
@@ -79,6 +120,17 @@ public class DefaultDriverClient implements DriverClient {
         }
 
         String trimmedId = driverId.trim();
+        if (!isStubMode()) {
+            try {
+                return fetchRemoteDrivers().stream()
+                        .filter(d -> trimmedId.equals(d.getDriverId()) || trimmedId.equals(d.getUserId()))
+                        .findFirst();
+            } catch (Exception e) {
+                log.error("DefaultDriverClient: failed to lookup driverId '{}': {}", trimmedId, e.getMessage());
+                return Optional.empty();
+            }
+        }
+
         if ("INVALID".equalsIgnoreCase(trimmedId)
                 || "NON_EXISTENT".equalsIgnoreCase(trimmedId)
                 || "INACTIVE".equalsIgnoreCase(trimmedId)
@@ -88,7 +140,7 @@ public class DefaultDriverClient implements DriverClient {
 
         log.info("DefaultDriverClient: resolving driver information for driverId='{}'", trimmedId);
         try {
-            // Decoupled boundary: delegates to REST/gRPC client or read model
+            // Stub mode: offline placeholder driver
             EligibleDriver driver = new EligibleDriver(
                     trimmedId,
                     "user-" + trimmedId,
@@ -119,7 +171,18 @@ public class DefaultDriverClient implements DriverClient {
         if (userId == null || userId.trim().isEmpty()) {
             return Optional.empty();
         }
-        return findDriverById(userId.trim());
+        String trimmedUserId = userId.trim();
+        if (!isStubMode()) {
+            try {
+                return fetchRemoteDrivers().stream()
+                        .filter(d -> trimmedUserId.equals(d.getUserId()))
+                        .findFirst();
+            } catch (Exception e) {
+                log.error("DefaultDriverClient: failed to lookup driver for userId '{}': {}", trimmedUserId, e.getMessage());
+                return Optional.empty();
+            }
+        }
+        return findDriverById(trimmedUserId);
     }
 
     @Override

@@ -73,7 +73,7 @@ class InboxEventServiceTest {
 
         assertThat(assignment).isNotNull();
         assertThat(assignment.getOrderId()).isEqualTo(orderId);
-        assertThat(assignment.getStatus()).isEqualTo(AssignmentStatus.PENDING);
+        assertThat(assignment.getStatus()).isEqualTo(AssignmentStatus.UNASSIGNED); // auto-assignment runs on consume; no eligible drivers in test env
 
         // Verify inbox record
         Optional<InboxEvent> inboxEvent = inboxEventService.findByEventId(eventId);

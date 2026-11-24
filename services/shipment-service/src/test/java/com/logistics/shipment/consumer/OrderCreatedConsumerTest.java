@@ -76,7 +76,7 @@ class OrderCreatedConsumerTest {
         assertThat(result.getCustomerId()).isEqualTo("cust-uuid-111");
         assertThat(result.getRecipientName()).isEqualTo("Lê Văn C");
         assertThat(result.getDeliveryAddress()).isEqualTo("789 Điện Biên Phủ, Bình Thạnh, TP.HCM");
-        assertThat(result.getStatus()).isEqualTo(AssignmentStatus.PENDING);
+        assertThat(result.getStatus()).isEqualTo(AssignmentStatus.UNASSIGNED); // auto-assignment runs on consume; no eligible drivers in test env
 
         // Verify persisted in DB
         Assignment persisted = assignmentRepository.findByOrderId(orderId).orElse(null);

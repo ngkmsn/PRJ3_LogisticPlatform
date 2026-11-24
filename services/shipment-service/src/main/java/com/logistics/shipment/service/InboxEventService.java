@@ -88,7 +88,7 @@ public class InboxEventService {
                     return assignmentRepository.findByOrderId(payload.getOrderId()).orElse(null);
                 }
 
-                Assignment assignment = assignmentService.initiateAssignment(payload);
+                Assignment assignment = assignmentService.autoAssignOrder(payload);
 
                 Instant now = Instant.now();
                 InboxEvent inboxEvent = new InboxEvent(

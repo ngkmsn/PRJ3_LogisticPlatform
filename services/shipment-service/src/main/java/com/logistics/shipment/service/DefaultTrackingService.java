@@ -132,6 +132,7 @@ public class DefaultTrackingService implements TrackingService {
                             + " is older than current location timestamp " + existing.getTimestamp());
                 }
 
+                existing.setDriverId(driverId); // keep record keyed by the current driver profile id
                 existing.setLatitude(lat);
                 existing.setLongitude(lon);
                 existing.setAccuracy(request.getAccuracy());

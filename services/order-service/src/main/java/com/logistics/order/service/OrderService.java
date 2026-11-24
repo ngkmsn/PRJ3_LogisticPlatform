@@ -406,6 +406,98 @@ public class OrderService {
         return OrderDto.from(order);
     }
 
+    /**
+     * Mirrors delivery progress published by shipment-service (the source of truth for delivery state)
+     * onto the order, so customers see the real status.
+     *
+     * Mapping: DRIVER_ASSIGNED / DRIVER_REASSIGNED -> ASSIGNED, ORDER_IN_TRANSIT -> IN_TRANSIT,
+     * ORDER_DELIVERED -> DELIVERED, ORDER_FAILED -> CONFIRMED (awaiting re-dispatch).
+     * ORDER_PICKED_UP has no order status of its own and is recorded in history only.
+     *
+     * Idempotent by state: terminal orders and stale/duplicate events (that would move the order
+     * backwards) are ignored, except ORDER_FAILED which intentionally re-opens dispatch.
+     *
+     * @return true when the order status changed
+     */
+    @Transactional
+    public boolean applyShipmentEvent(String orderId, String eventType, String reason) {
+        if (orderId == null || orderId.isBlank() || eventType == null) {
+            return false;
+        }
+        Order order = orderRepository.findByIdOrOrderNumber(orderId.trim()).orElse(null);
+        if (order == null) {
+            log.warn("Shipment event '{}' ignored: order '{}' not found", eventType, orderId);
+            return false;
+        }
+
+        OrderStatus current = order.getStatus();
+        if (current == OrderStatus.DELIVERED || current == OrderStatus.CANCELLED) {
+            log.info("Shipment event '{}' ignored: order '{}' is already terminal ({})", eventType, orderId, current);
+            return false;
+        }
+
+        String type = eventType.trim().toUpperCase();
+        if ("ORDER_PICKED_UP".equals(type)) {
+            recordStatusHistory(order, current, current, "shipment-service", "SYSTEM",
+                    "Tài xế đã lấy hàng" + (reason != null && !reason.isBlank() ? ": " + reason : ""));
+            return false;
+        }
+
+        OrderStatus target;
+        String defaultReason;
+        switch (type) {
+            case "DRIVER_ASSIGNED", "DRIVER_REASSIGNED" -> {
+                target = OrderStatus.ASSIGNED;
+                defaultReason = "Đã phân công tài xế";
+            }
+            case "ORDER_IN_TRANSIT" -> {
+                target = OrderStatus.IN_TRANSIT;
+                defaultReason = "Tài xế đang giao hàng";
+            }
+            case "ORDER_DELIVERED" -> {
+                target = OrderStatus.DELIVERED;
+                defaultReason = "Giao hàng thành công";
+            }
+            case "ORDER_FAILED" -> {
+                target = OrderStatus.CONFIRMED;
+                defaultReason = "Giao hàng thất bại, chờ điều phối lại";
+            }
+            default -> {
+                log.debug("Shipment event '{}' has no order status mapping; ignored", eventType);
+                return false;
+            }
+        }
+
+        if (current == target) {
+            return false;
+        }
+        boolean isFailure = "ORDER_FAILED".equals(type);
+        if (!isFailure && statusRank(target) < statusRank(current)) {
+            log.info("Shipment event '{}' ignored for order '{}': would move status backwards ({} -> {})",
+                    eventType, orderId, current, target);
+            return false;
+        }
+
+        String historyReason = (reason != null && !reason.isBlank()) ? defaultReason + ": " + reason.trim() : defaultReason;
+        order.setStatus(target);
+        order.setUpdatedAt(Instant.now());
+        orderRepository.persist(order);
+        recordStatusHistory(order, current, target, "shipment-service", "SYSTEM", historyReason);
+
+        log.info("Order '{}' status synced from shipment event '{}': {} -> {}", orderId, eventType, current, target);
+        return true;
+    }
+
+    private static int statusRank(OrderStatus status) {
+        return switch (status) {
+            case PENDING -> 0;
+            case CONFIRMED -> 1;
+            case ASSIGNED -> 2;
+            case IN_TRANSIT -> 3;
+            case DELIVERED, CANCELLED -> 4;
+        };
+    }
+
     public List<OrderStatusHistoryDto> getOrderHistory(String authHeader, String orderIdentifier) {
         if (authHeader == null || !authHeader.startsWith("Bearer ")) {
             log.warn("Authentication failed: missing or invalid Authorization header");

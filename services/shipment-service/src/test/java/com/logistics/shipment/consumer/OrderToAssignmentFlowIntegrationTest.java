@@ -100,15 +100,15 @@ class OrderToAssignmentFlowIntegrationTest {
         assertThat(createdAssignment.getRecipientPhone()).isEqualTo(recipientPhone);
         assertThat(createdAssignment.getDeliveryAddress()).isEqualTo(deliveryAddress);
         assertThat(createdAssignment.getTotalAmount()).isEqualByComparingTo(totalAmount);
-        assertThat(createdAssignment.getStatus()).isEqualTo(AssignmentStatus.PENDING);
+        assertThat(createdAssignment.getStatus()).isEqualTo(AssignmentStatus.UNASSIGNED); // auto-assignment runs on consume; no eligible drivers in test env
         assertThat(createdAssignment.getNotes()).isEqualTo(notes);
-        assertThat(createdAssignment.getDriverId()).isNull(); // No driver assigned yet at initiation stage
+        assertThat(createdAssignment.getDriverId()).isNull(); // No eligible driver in test env
 
         // 4. Verify persisted state in shipment_db
         Assignment fromDb = assignmentService.findByOrderId(orderId).orElse(null);
         assertThat(fromDb).isNotNull();
         assertThat(fromDb.getId()).isEqualTo(createdAssignment.getId());
-        assertThat(fromDb.getStatus()).isEqualTo(AssignmentStatus.PENDING);
+        assertThat(fromDb.getStatus()).isEqualTo(AssignmentStatus.UNASSIGNED); // auto-assignment runs on consume; no eligible drivers in test env
 
         // 5. Test idempotency: Resend identical event
         Assignment duplicateResult = orderCreatedConsumer.processOrderEvent(serializedKafkaMessage);

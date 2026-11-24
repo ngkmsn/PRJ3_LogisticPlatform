@@ -186,7 +186,7 @@ public class OrderCreatedConsumer {
         if (inboxEventService != null) {
             return inboxEventService.processOrderCreatedWithInbox(eventId, eventType, aggregateId, payload);
         }
-        return assignmentService.initiateAssignment(payload);
+        return assignmentService.autoAssignOrder(payload);
     }
 
     private boolean isOrderCreatedEventType(String eventType) {
