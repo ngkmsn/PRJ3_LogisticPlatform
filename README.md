@@ -3820,6 +3820,41 @@ Chạy thật toàn bộ hệ thống (Postgres, Kafka, 5 service, gateway) đ�
 
 ---
 
+## Desktop Client (fe_dispatcher)
+
+Desktop app for operations staff (`DISPATCHER`) and administrators (`ADMIN`), built with React 19 + Vite + TypeScript and packaged with Electron. Customer and driver accounts are refused at sign-in.
+
+| Screen | Roles | What it does |
+|---|---|---|
+| Dashboard | ADMIN, DISPATCHER | Live order/driver KPIs, attention items, recent orders (refreshes every 30 s) |
+| Orders | ADMIN, DISPATCHER | All orders with status filter; order detail with items, status history and assignment history |
+| Needs Action | ADMIN, DISPATCHER | Unassigned and failed orders; manual assign / reassign to a real driver (refreshes every 15 s) |
+| Drivers | ADMIN, DISPATCHER | Fleet availability, active orders and GPS on an OpenStreetMap map (refreshes every 10 s) |
+| Users | ADMIN | Create users, lock/unlock, create driver profiles for `DRIVER` accounts |
+
+### Run
+
+Prerequisites: Node.js 22+, pnpm, and the backend running (gateway on `http://localhost:8080`).
+
+```bash
+cd fe_dispatcher
+pnpm install
+node node_modules/electron/install.js   # one-time: pnpm skips Electron's binary download
+```
+
+| Command | Purpose |
+|---|---|
+| `pnpm dev` | Browser at http://localhost:5173 (Vite proxies `/api` to the gateway) |
+| `pnpm electron:dev` | Same app inside an Electron window, with hot reload |
+| `pnpm electron:build` | Packaged app at `release/mac-arm64/Logistics Dispatcher.app` |
+| `pnpm test` / `pnpm typecheck` | Unit tests (Vitest) / type check |
+
+The login screen has a **Server** field (default `http://localhost:8080` in the desktop app), so the app can point at a backend on another machine without rebuilding. The packaged app serves its files from `app://dispatcher`, an origin the gateway allows via CORS (`GATEWAY_CORS_ORIGINS` to extend).
+
+Demo accounts: `admin / Admin@123`, `dispatcher / Dispatcher@123`. Run `bash scripts/demo-data.sh` first so every screen has data.
+
+---
+
 ## Roadmap
 
 | PB Item | Scope | Status |
@@ -3884,6 +3919,7 @@ Chạy thật toàn bộ hệ thống (Postgres, Kafka, 5 service, gateway) đ�
 | **PB-058** | Authorization theo Service Boundary: Tự kiểm tra quyền & ownership tại từng microservice, chống IDOR, Zero-Trust backend, phân định 401 vs 403, S2S least privilege | ✅ Completed |
 | **PB-059** | Nối luồng end-to-end: sửa outbox payload, auto-assign khi nhận OrderCreated, lấy driver thật từ user-service, đồng bộ trạng thái Order từ shipment events | ✅ Completed |
 | **PB-060** | Customer tự đăng ký (`POST /api/auth/register`) & CORS tại API Gateway cho client trình duyệt | ✅ Completed |
+| **PB-061** | Desktop client cho Admin/Operator: đăng nhập thật, Dashboard, Orders, Needs Action (gán/gán lại tài xế), Drivers + bản đồ, quản lý user, đóng gói Electron; staff xem toàn bộ đơn; script dữ liệu demo | ✅ Completed |
 
 
 
