@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, type ReactNode } from "react"
+import React, { useState, useEffect, useCallback, type ReactNode } from "react"
 
 type Page = "Dashboard" | "Orders" | "Assignment" | "Drivers" | "Exceptions" | "Reports" | "Settings"
 type IconName = "grid" | "box" | "route" | "truck" | "alert" | "chart" | "settings" | "search" | "bell" | "chevron" | "dots" | "filter" | "download" | "refresh" | "check" | "clock" | "user" | "close" | "arrow" | "bolt"
@@ -450,7 +450,7 @@ function Button({
   children: ReactNode
   icon?: IconName
   variant?: string
-  onClick?: () => void
+  onClick?: (event: React.MouseEvent<HTMLButtonElement>) => void
 }) {
   return (
     <button className={`btn btn-${variant}`} onClick={onClick}>
@@ -2550,7 +2550,7 @@ function OrderDetail({
         <div style={{ display: "flex", gap: 8 }}>
           <Button>Cancel order</Button>
           {!failed && (
-            <Button variant="primary" icon="pin" onClick={track}>
+            <Button variant="primary" icon="route" onClick={track}>
               Track Driver GPS
             </Button>
           )}
