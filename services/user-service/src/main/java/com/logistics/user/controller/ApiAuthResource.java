@@ -1,6 +1,7 @@
 package com.logistics.user.controller;
 
 import com.logistics.user.dto.LoginRequest;
+import com.logistics.user.dto.RegisterCustomerRequest;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.validation.Valid;
@@ -26,6 +27,12 @@ public class ApiAuthResource {
     @Path("/login")
     public Response login(@Valid LoginRequest request) {
         return authController.login(request);
+    }
+
+    @POST
+    @Path("/register")
+    public Response register(@Valid RegisterCustomerRequest request) {
+        return authController.register(request);
     }
 
     @GET

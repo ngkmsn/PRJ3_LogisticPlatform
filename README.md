@@ -339,12 +339,14 @@ mvn clean package -DskipTests
    ```
 2. **Start microservices (in individual terminals or IDE):**
    ```bash
-   mvn spring-boot:run -pl services/user-service
-   mvn spring-boot:run -pl services/order-service
-   mvn spring-boot:run -pl services/shipment-service
-   mvn spring-boot:run -pl services/notification-service
-   mvn spring-boot:run -pl services/api-gateway
+   mvn quarkus:dev -pl services/user-service
+   mvn quarkus:dev -pl services/order-service -Ddebug=5006
+   mvn quarkus:dev -pl services/shipment-service -Ddebug=5007
+   mvn quarkus:dev -pl services/notification-service -Ddebug=5008
+   mvn quarkus:dev -pl services/api-gateway -Ddebug=5009
    ```
+   Or run the packaged apps after `mvn install -DskipTests`: `java -jar services/<service>/target/quarkus-app/quarkus-run.jar`.
+   Build with JDK 21–23; Quarkus 3.15 does not support JDK 25 (Byte Buddy error at build time).
 
 ---
 
@@ -3775,6 +3777,39 @@ Mỗi microservice tự áp dụng các quy tắc kiểm soát quyền sở hữ
 
 ---
 
+## Task PB-059: Nối Luồng Giao Hàng End-to-End
+
+Chạy thật toàn bộ hệ thống (Postgres, Kafka, 5 service, gateway) để đi trọn luồng demo đã phát hiện và sửa các chỗ đứt mà test đơn lẻ không bắt được:
+
+- **Outbox payload**: bỏ `@Lob` ở `OutboxEvent` (order-service, shipment-service), map cột `payload` là `TEXT`. Trên PostgreSQL, `@Lob String` bị lưu thành số tham chiếu large object nên publisher không đọc lại được payload.
+- **Auto-assignment khi nhận OrderCreated**: `OrderCreatedConsumer` / `InboxEventService` gọi `autoAssignOrder(...)` (chạy pipeline PB-026 → PB-030) thay vì chỉ tạo assignment `PENDING`.
+- **Tài xế thật từ user-service**: `DefaultDriverClient` lấy danh sách driver qua `GET /drivers` với service token (PB-057) và gắn vị trí GPS mới nhất. Cấu hình `logistics.driver-client.mode=remote|stub` (`stub` dùng cho profile test).
+- **Đồng bộ trạng thái Order**: `ShipmentEventConsumer` (order-service) nghe `logistics.shipment.events` và cập nhật trạng thái qua `OrderService.applyShipmentEvent(...)`, ghi lịch sử với `changedBy = shipment-service`.
+
+| Shipment event | Order status |
+|---|---|
+| `DRIVER_ASSIGNED`, `DRIVER_REASSIGNED` | `ASSIGNED` |
+| `ORDER_PICKED_UP` | giữ nguyên, chỉ ghi lịch sử |
+| `ORDER_IN_TRANSIT` | `IN_TRANSIT` |
+| `ORDER_DELIVERED` | `DELIVERED` |
+| `ORDER_FAILED` | `CONFIRMED` (chờ điều phối lại) |
+
+  Idempotent theo trạng thái: event trùng hoặc đến muộn không kéo trạng thái lùi; đơn đã `DELIVERED`/`CANCELLED` bỏ qua mọi event.
+- **GPS theo driver profile id**: khi cập nhật vị trí, `driver_id` được đồng bộ theo profile id hiện tại để Customer tracking tìm đúng vị trí tài xế.
+
+---
+
+## Task PB-060: Customer Tự Đăng Ký & CORS cho Client
+
+- **Đăng ký Customer**: `POST /api/auth/register` (hoặc `/auth/register`), không cần token.
+  ```json
+  { "username": "nguyenvana", "email": "a@example.com", "password": "Secret@123" }
+  ```
+  Trả về `201 Created` với cùng cấu trúc như login (`accessToken`, `user`) để client đăng nhập luôn. Tài khoản luôn là `CUSTOMER` + `ACTIVE`; trường `role` trong body bị bỏ qua. Trùng username/email → `409`, dữ liệu không hợp lệ → `400`.
+- **CORS tại API Gateway**: bật CORS của Quarkus cho các client chạy trên trình duyệt (desktop dispatcher, Expo web). Mặc định cho phép mọi cổng của `localhost` / `127.0.0.1`; thêm origin khác bằng biến môi trường `GATEWAY_CORS_ORIGINS`. Origin lạ bị từ chối (`403 CORS Rejected`). Mobile app native không cần CORS.
+
+---
+
 ## Roadmap
 
 | PB Item | Scope | Status |
@@ -3837,6 +3872,8 @@ Mỗi microservice tự áp dụng các quy tắc kiểm soát quyền sở hữ
 | **PB-056** | Backpressure: Tự điều tiết tốc độ với máy trạng thái NORMAL/THROTTLED/SHEDDING, bounded concurrency, EWMA latency, pacing delay, load shedding & telemetry | ✅ Completed |
 | **PB-057** | Service-to-Service Authentication: JWT Service Identity, least privilege scopes, token caching/renewal, zero-downtime key rotation, boundary enforcement & log masking | ✅ Completed |
 | **PB-058** | Authorization theo Service Boundary: Tự kiểm tra quyền & ownership tại từng microservice, chống IDOR, Zero-Trust backend, phân định 401 vs 403, S2S least privilege | ✅ Completed |
+| **PB-059** | Nối luồng end-to-end: sửa outbox payload, auto-assign khi nhận OrderCreated, lấy driver thật từ user-service, đồng bộ trạng thái Order từ shipment events | ✅ Completed |
+| **PB-060** | Customer tự đăng ký (`POST /api/auth/register`) & CORS tại API Gateway cho client trình duyệt | ✅ Completed |
 
 
 

@@ -3,19 +3,26 @@ package com.logistics.user.service;
 import com.logistics.common.security.JwtTokenProvider;
 import com.logistics.user.dto.LoginRequest;
 import com.logistics.user.dto.LoginResponse;
+import com.logistics.user.dto.RegisterCustomerRequest;
 import com.logistics.user.dto.UserProfileDto;
 import com.logistics.user.dto.UserSummaryDto;
 import com.logistics.user.entity.User;
+import com.logistics.user.entity.UserRole;
 import com.logistics.user.entity.UserStatus;
 import com.logistics.user.exception.AccountNotActiveException;
 import com.logistics.user.exception.BadCredentialsException;
+import com.logistics.user.exception.UserAlreadyExistsException;
 import com.logistics.user.exception.UserNotFoundException;
 import com.logistics.user.repository.UserRepository;
 import io.quarkus.elytron.security.common.BcryptUtil;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import jakarta.transaction.Transactional;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.time.Instant;
+import java.util.UUID;
 
 @ApplicationScoped
 public class AuthenticationService {
@@ -50,6 +57,44 @@ public class AuthenticationService {
             throw new BadCredentialsException();
         }
 
+        return issueToken(user);
+    }
+
+    /**
+     * Public customer self-registration. The account is always created as an ACTIVE CUSTOMER
+     * and the caller is signed in immediately (same response shape as login).
+     */
+    @Transactional
+    public LoginResponse registerCustomer(RegisterCustomerRequest request) {
+        String username = request.getUsername().trim();
+        String email = request.getEmail().trim().toLowerCase();
+
+        if (userRepository.existsByUsername(username)) {
+            log.warn("Registration rejected: username '{}' already exists", username);
+            throw new UserAlreadyExistsException("Username '" + username + "' is already taken");
+        }
+        if (userRepository.existsByEmail(email)) {
+            log.warn("Registration rejected: email already registered");
+            throw new UserAlreadyExistsException("Email '" + email + "' is already registered");
+        }
+
+        Instant now = Instant.now();
+        User user = new User();
+        user.setId(UUID.randomUUID().toString());
+        user.setUsername(username);
+        user.setEmail(email);
+        user.setPasswordHash(BcryptUtil.bcryptHash(request.getPassword()));
+        user.setRole(UserRole.CUSTOMER);
+        user.setStatus(UserStatus.ACTIVE);
+        user.setCreatedAt(now);
+        user.setUpdatedAt(now);
+        userRepository.persist(user);
+
+        log.info("New customer self-registered: id='{}', username='{}'", user.getId(), user.getUsername());
+        return issueToken(user);
+    }
+
+    private LoginResponse issueToken(User user) {
         String roleName = user.getRole() != null ? user.getRole().name() : "CUSTOMER";
         String token = jwtTokenProvider.generateToken(
                 user.getId(),

@@ -3,6 +3,7 @@ package com.logistics.user.controller;
 import com.logistics.common.dto.ApiResponse;
 import com.logistics.common.security.JwtTokenProvider;
 import com.logistics.user.dto.LoginRequest;
+import com.logistics.user.dto.RegisterCustomerRequest;
 import com.logistics.user.dto.LoginResponse;
 import com.logistics.user.service.AuthenticationService;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -37,6 +38,15 @@ public class AuthController {
     public Response login(@Valid LoginRequest request) {
         LoginResponse response = authenticationService.login(request);
         return Response.ok(ApiResponse.ok("Login successful", response)).build();
+    }
+
+    @POST
+    @Path("/register")
+    public Response register(@Valid RegisterCustomerRequest request) {
+        LoginResponse response = authenticationService.registerCustomer(request);
+        return Response.status(Response.Status.CREATED)
+                .entity(ApiResponse.ok("Registration successful", response))
+                .build();
     }
 
     @GET
