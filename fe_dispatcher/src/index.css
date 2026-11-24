@@ -188,3 +188,22 @@ nav a.active { background: #213653; color: white; box-shadow: inset 3px 0 #4d8df
 .clickable-row { cursor: pointer; }
 .clickable-row:hover td { background: #f6f8fb; }
 .page > .panel { margin-top: 16px; }
+.assign-modal { width: 640px; }
+.modal-body { padding: 14px 18px; display: flex; flex-direction: column; gap: 12px; }
+.modal-body .driver-options { padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.driver-option { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border: 1px solid #dfe3e8; border-radius: 6px; cursor: pointer; }
+.driver-option.selected { border-color: #5d8ee8; background: #f3f7ff; }
+.driver-option.disabled { background: #f6f7f8; opacity: .6; cursor: not-allowed; }
+.driver-option > div:nth-of-type(1) { flex: 1; display: flex; flex-direction: column; gap: 3px; }
+.driver-option strong { font-size: 12px; }
+.driver-option span, .driver-option small { font-size: 11px; color: #7a8695; }
+.driver-option-meta { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; min-width: 140px; }
+.modal-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 14px 18px; border-top: 1px solid #e2e6ea; }
+.tab-bar { display: flex; gap: 6px; }
+.tab-bar button { border: 1px solid #dfe3e8; background: #fff; border-radius: 6px; padding: 6px 12px; font-size: 12px; }
+.tab-bar button.active { background: #213653; color: #fff; border-color: #213653; }
+.tab-bar em { font-style: normal; margin-left: 6px; opacity: .8; }
+.inline-field { flex-direction: row; align-items: center; gap: 8px; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; }
+.row-actions { display: flex; gap: 6px; }
+.modal { max-width: calc(100vw - 32px); max-height: calc(100vh - 32px); overflow: auto; }

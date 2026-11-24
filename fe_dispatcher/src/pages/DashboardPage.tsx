@@ -28,7 +28,12 @@ export function DashboardPage() {
     )
   }
 
-  const { orderMetrics: o, driverMetrics: d, attentionItems, generatedAt } = query.data
+  if (!query.data?.orderMetrics || !query.data.driverMetrics) {
+    return <StateMessage>No dashboard data available yet.</StateMessage>
+  }
+
+  const { orderMetrics: o, driverMetrics: d, generatedAt } = query.data
+  const attentionItems = query.data.attentionItems ?? []
   const failed = o.ordersByStatus?.FAILED ?? o.failedOrders
   const waiting = o.pendingOrders + (o.ordersByStatus?.CONFIRMED ?? 0)
   const assigned = o.assignedOrders + o.searchingDriverOrders + o.pickedUpOrders
