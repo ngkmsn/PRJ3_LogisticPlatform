@@ -185,3 +185,6 @@ nav a.active { background: #213653; color: white; box-shadow: inset 3px 0 #4d8df
 .state-message { padding: 28px; text-align: center; color: #66717f; }
 .state-error { color: #a4262c; }
 .btn:disabled { opacity: .55; cursor: not-allowed; }
+.clickable-row { cursor: pointer; }
+.clickable-row:hover td { background: #f6f8fb; }
+.page > .panel { margin-top: 16px; }

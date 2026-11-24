@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "dispatcher-web",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["--dir", "fe_dispatcher", "dev"],
+      "port": 5173
+    }
+  ]
+}
