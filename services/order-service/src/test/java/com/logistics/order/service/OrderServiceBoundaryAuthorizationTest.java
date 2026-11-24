@@ -124,7 +124,7 @@ class OrderServiceBoundaryAuthorizationTest {
     void driver_readOrderDetails_rejectedWith403() {
         assertThatThrownBy(() -> orderService.getOrderDetails(driverToken, "ord-100"))
                 .isInstanceOf(AccessDeniedException.class)
-                .hasMessageContaining("Only customers are permitted to view order details");
+                .hasMessageContaining("Only customers and operations staff are permitted to view order details");
     }
 
     @Test
