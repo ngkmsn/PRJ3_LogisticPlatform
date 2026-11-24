@@ -63,7 +63,7 @@ class GatewayRateLimitHandlerTest {
         handler.handle(ctx);
 
         verify(ctx).next();
-        verify(ctx.response()).putHeader("X-RateLimit-Limit", "30");
+        verify(ctx.response()).putHeader("X-RateLimit-Limit", "120");
         verify(ctx.response()).putHeader(eq("X-RateLimit-Remaining"), anyString());
         verify(ctx.response()).putHeader(eq("X-RateLimit-Reset"), anyString());
         verify(ctx.response(), never()).setStatusCode(429);
@@ -97,11 +97,11 @@ class GatewayRateLimitHandlerTest {
     @Test
     @DisplayName("Different endpoints apply their respective tiered policies")
     void differentEndpoints_applyRespectivePolicies() {
-        // Orders policy limit is 30, auth is 10, tracking is 120
+        // Orders policy limit is 120, auth is 10, tracking is 120
         assertThat(config.getAuthPolicy().getLimit()).isEqualTo(10);
-        assertThat(config.getOrdersPolicy().getLimit()).isEqualTo(30);
+        assertThat(config.getOrdersPolicy().getLimit()).isEqualTo(120);
         assertThat(config.getTrackingPolicy().getLimit()).isEqualTo(120);
-        assertThat(config.getDefaultPolicy().getLimit()).isEqualTo(60);
+        assertThat(config.getDefaultPolicy().getLimit()).isEqualTo(120);
 
         RoutingContext authCtx = mockContext("/auth/login", "1.1.1.1", null, null);
         handler.handle(authCtx);

@@ -29,6 +29,19 @@ class GatewayCorsTest {
     }
 
     @Test
+    @DisplayName("Preflight from the Electron desktop origin app://dispatcher is allowed")
+    void preflight_electronOrigin_allowed() {
+        given()
+                .header("Origin", "app://dispatcher")
+                .header("Access-Control-Request-Method", "GET")
+                .when()
+                .options("/api/orders")
+                .then()
+                .statusCode(200)
+                .header("Access-Control-Allow-Origin", is("app://dispatcher"));
+    }
+
+    @Test
     @DisplayName("Preflight from an unknown origin is not granted CORS access")
     void preflight_foreignOrigin_rejected() {
         given()

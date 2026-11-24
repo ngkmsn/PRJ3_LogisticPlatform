@@ -47,7 +47,7 @@ public class GatewayRateLimitConfig {
         long authWindow = getLongConfig("gateway.rate-limit.policies.auth.window-seconds", 60);
         this.authPolicy = new RateLimitPolicy("auth", authLimit, authWindow, RateLimitKeyType.IP_ONLY);
 
-        long ordersLimit = getLongConfig("gateway.rate-limit.policies.orders.limit", 30);
+        long ordersLimit = getLongConfig("gateway.rate-limit.policies.orders.limit", 120);
         long ordersWindow = getLongConfig("gateway.rate-limit.policies.orders.window-seconds", 60);
         this.ordersPolicy = new RateLimitPolicy("orders", ordersLimit, ordersWindow, RateLimitKeyType.IP_AND_USER);
 
@@ -55,7 +55,7 @@ public class GatewayRateLimitConfig {
         long trackingWindow = getLongConfig("gateway.rate-limit.policies.tracking.window-seconds", 60);
         this.trackingPolicy = new RateLimitPolicy("tracking", trackingLimit, trackingWindow, RateLimitKeyType.IP_AND_USER);
 
-        long defaultLimit = getLongConfig("gateway.rate-limit.policies.default.limit", 60);
+        long defaultLimit = getLongConfig("gateway.rate-limit.policies.default.limit", 120);
         long defaultWindow = getLongConfig("gateway.rate-limit.policies.default.window-seconds", 60);
         this.defaultPolicy = new RateLimitPolicy("default", defaultLimit, defaultWindow, RateLimitKeyType.IP_AND_USER);
 
