@@ -348,6 +348,16 @@ mvn clean package -DskipTests
    Or run the packaged apps after `mvn install -DskipTests`: `java -jar services/<service>/target/quarkus-app/quarkus-run.jar`.
    Build with JDK 21–23; Quarkus 3.15 does not support JDK 25 (Byte Buddy error at build time).
 
+### Demo data
+
+With the stack running, seed demo data through the gateway (safe to re-run):
+
+```bash
+bash scripts/demo-data.sh
+```
+
+It creates drivers `driver2` / `driver3` (password `Driver@123`) with profiles, posts GPS positions around Ho Chi Minh City, and creates customer orders that end up assigned, in transit, delivered, failed and unassigned. Open orders left by earlier runs are delivered first so driver workload limits never block new assignments.
+
 ---
 
 ## Database Migrations (Liquibase)
