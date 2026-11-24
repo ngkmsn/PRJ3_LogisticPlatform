@@ -165,3 +165,23 @@ tr.overdue { background:#fff9f8; box-shadow:inset 3px 0 #d7464f; }
   .system-health { display: none; }
   .hide-small { display:none; }
 }
+
+/* ---- Desktop client additions ---- */
+nav a { width: 100%; height: 42px; display: flex; align-items: center; gap: 12px; color: #a9b5c5; background: transparent; border-radius: 6px; padding: 0 12px; margin-bottom: 3px; font-size: 13px; text-decoration: none; }
+nav a:hover { background: #1a2a3e; color: white; }
+nav a.active { background: #213653; color: white; box-shadow: inset 3px 0 #4d8dff; }
+.sign-out { margin-left: auto; color: #d7dee7; background: transparent; border: 0; }
+.login-screen { min-height: 100vh; display: grid; place-items: center; background: #111d2c; }
+.login-card { width: 380px; background: #fff; border-radius: 12px; padding: 28px; display: flex; flex-direction: column; gap: 14px; box-shadow: 0 20px 50px rgba(0,0,0,.35); }
+.login-brand { height: auto; padding: 0; border: 0; color: #1b2430; }
+.login-brand strong { color: #1b2430 !important; }
+.login-card h1 { margin: 4px 0 0; font-size: 22px; }
+.login-sub { margin: 0; color: #66717f; font-size: 13px; }
+.field { display: flex; flex-direction: column; gap: 6px; font-size: 13px; font-weight: 600; color: #344050; }
+.field input, .field select, .field textarea { font-weight: 400; padding: 9px 11px; border: 1px solid #d4dae1; border-radius: 7px; background: #fff; }
+.field input:focus, .field select:focus, .field textarea:focus { outline: 2px solid #2b6ff2; outline-offset: -1px; }
+.form-error { background: #fdecec; color: #a4262c; border: 1px solid #f5c2c4; border-radius: 7px; padding: 9px 11px; font-size: 13px; }
+.login-submit { justify-content: center; height: 40px; }
+.state-message { padding: 28px; text-align: center; color: #66717f; }
+.state-error { color: #a4262c; }
+.btn:disabled { opacity: .55; cursor: not-allowed; }
