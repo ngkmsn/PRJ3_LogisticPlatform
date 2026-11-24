@@ -22,7 +22,7 @@ import java.util.List;
  * Rules:
  * 1. Active orders workload calculation:
  *    - Reuses driver.currentWorkload if present.
- *    - If null, queries active assignments (status = ASSIGNED, excluding CANCELLED and FAILED) from AssignmentRepository.
+ *    - If null, queries active assignments (status ASSIGNED, PICKED_UP or IN_TRANSIT) from AssignmentRepository.
  *    - If incomplete/unresolvable, safely defaults to 0.
  * 2. Data validity:
  *    - Rejects invalid negative workloads (< 0).

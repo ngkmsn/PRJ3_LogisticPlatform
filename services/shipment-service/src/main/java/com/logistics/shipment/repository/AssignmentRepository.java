@@ -93,11 +93,16 @@ public class AssignmentRepository implements PanacheRepositoryBase<Assignment, S
         return find("orderId = ?1 and status = ?2", orderId.trim(), AssignmentStatus.FAILED).firstResultOptional();
     }
 
+    /**
+     * Orders the driver still carries: assigned but not picked up, picked up, or on the way.
+     * Used for the workload hard limit, so parcels already in the driver's hands must count too.
+     */
     public long countActiveAssignmentsByDriverId(String driverId) {
         if (driverId == null || driverId.trim().isEmpty()) {
             return 0;
         }
-        return count("driverId = ?1 and status = ?2", driverId.trim(), AssignmentStatus.ASSIGNED);
+        return count("driverId = ?1 and status in (?2, ?3, ?4)", driverId.trim(),
+                AssignmentStatus.ASSIGNED, AssignmentStatus.PICKED_UP, AssignmentStatus.IN_TRANSIT);
     }
 
     public com.logistics.shipment.dto.PagedResponse<Assignment> findAssignedOrdersByDriver(

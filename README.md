@@ -3855,6 +3855,34 @@ Demo accounts: `admin / Admin@123`, `dispatcher / Dispatcher@123`. Run `bash scr
 
 ---
 
+## Mobile App (mobile)
+
+One Expo (React Native + TypeScript) app for **customers** and **drivers**; after sign-in it opens the screens for the account's role. Admin and dispatcher accounts are refused (they use the desktop client).
+
+| Role | Screens |
+|---|---|
+| Customer | Sign up / sign in; tabs **Home** (order counts by status, recent orders), **Orders** (status filter, infinite scroll) and **Account**; create a delivery, order detail with progress, cancel while pending, live driver map (refreshes every 5 s) |
+| Driver | Tabs **Deliveries** (on-duty switch that sets availability and shares GPS every ~10 s while the app is open, current deliveries), **History** (status filter, infinite scroll) and **Account**; in-app banner + haptic when a new order is assigned; confirm pickup → start delivery → delivered, report a failed delivery with a reason, call the recipient |
+
+### Run
+
+```bash
+cd mobile
+npm install
+npm run ios        # Metro on port 19000 + Expo Go in the iOS Simulator
+npm test           # Jest unit tests
+npm run typecheck
+```
+
+Port 19000 is used because 8081 (user-service) and 8090 (Kafka UI) are taken by the backend.
+
+- **iOS Simulator:** the default server `http://localhost:8080` works as is. Move the "driver" with *Features → Location* in the Simulator, or `xcrun simctl location booted set 10.7769,106.7009`.
+- **Real phone:** install Expo Go, join the same Wi-Fi as the computer, scan the QR code from `npm start`, and enter the computer's LAN address (for example `http://192.168.1.123:8080`) in the **Server** field on the sign-in screen.
+
+Demo accounts: `customer / Customer@123`, `driver / Driver@123` (plus `driver2`, `driver3` from `scripts/demo-data.sh`). New customers can register in the app.
+
+---
+
 ## Roadmap
 
 | PB Item | Scope | Status |
@@ -3920,6 +3948,7 @@ Demo accounts: `admin / Admin@123`, `dispatcher / Dispatcher@123`. Run `bash scr
 | **PB-059** | Nối luồng end-to-end: sửa outbox payload, auto-assign khi nhận OrderCreated, lấy driver thật từ user-service, đồng bộ trạng thái Order từ shipment events | ✅ Completed |
 | **PB-060** | Customer tự đăng ký (`POST /api/auth/register`) & CORS tại API Gateway cho client trình duyệt | ✅ Completed |
 | **PB-061** | Desktop client cho Admin/Operator: đăng nhập thật, Dashboard, Orders, Needs Action (gán/gán lại tài xế), Drivers + bản đồ, quản lý user, đóng gói Electron; staff xem toàn bộ đơn; script dữ liệu demo | ✅ Completed |
+| **PB-062** | Mobile app (Expo) cho Customer và Driver: đăng ký/đăng nhập, tạo/xem/hủy đơn, theo dõi tài xế trên bản đồ; tài xế bật làm việc + chia sẻ GPS, nhận hàng, giao hàng, báo thất bại | ✅ Completed |
 
 
 
