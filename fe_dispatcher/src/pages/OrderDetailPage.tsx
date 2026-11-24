@@ -7,9 +7,8 @@ import { getAssignmentHistory, getOrder, getOrderHistory } from '../api/orders'
 import { AssignDriverModal } from '../components/AssignDriverModal'
 import { formatDateTime, formatMoney, humanize } from '../components/format'
 import { Badge, Button, SectionTitle, StateMessage } from '../components/ui'
+import { assignModeFor } from './assignMode'
 
-/** Orders that can still receive a driver from operations. */
-const ASSIGNABLE = new Set(['PENDING', 'CONFIRMED'])
 
 export function OrderDetailPage() {
   const { id = '' } = useParams()
@@ -43,6 +42,7 @@ export function OrderDetailPage() {
   }
 
   const o = order.data
+  const mode = assignModeFor(o.status)
   return (
     <div className="page order-detail">
       <button className="back-button" onClick={() => navigate(-1)}>
@@ -57,9 +57,9 @@ export function OrderDetailPage() {
           <p>Created {formatDateTime(o.createdAt)} · Updated {formatDateTime(o.updatedAt)}</p>
         </div>
         <div>
-          {ASSIGNABLE.has(o.status) && (
+          {mode && (
             <Button variant="primary" icon="route" onClick={() => setAssignOpen(true)}>
-              Assign driver
+              {mode === 'assign' ? 'Assign driver' : 'Reassign driver'}
             </Button>
           )}
         </div>
@@ -199,8 +199,8 @@ export function OrderDetailPage() {
         </div>
       </div>
 
-      {assignOpen && (
-        <AssignDriverModal orderId={o.id} mode="assign" onClose={() => setAssignOpen(false)} onDone={() => setAssignOpen(false)} />
+      {assignOpen && mode && (
+        <AssignDriverModal orderId={o.id} orderLabel={o.orderNumber} mode={mode} onClose={() => setAssignOpen(false)} onDone={() => setAssignOpen(false)} />
       )}
     </div>
   )

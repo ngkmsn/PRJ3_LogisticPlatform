@@ -1,6 +1,7 @@
 import { app, BrowserWindow, net, protocol, shell } from 'electron'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { isInAppNavigation } from './navigation.js'
 
 /**
  * The built SPA is served from app://dispatcher/ instead of file:// so requests carry
@@ -45,10 +46,16 @@ function createWindow() {
     },
   })
 
-  // Links to other sites (e.g. OpenStreetMap attribution) open in the system browser.
+  // Links to other sites (e.g. OpenStreetMap attribution) open in the system browser,
+  // whether they target a new window or try to navigate the app window itself.
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:\/\//.test(url)) shell.openExternal(url)
     return { action: 'deny' }
+  })
+  win.webContents.on('will-navigate', (event, url) => {
+    if (isInAppNavigation(url, devUrl)) return
+    event.preventDefault()
+    if (/^https?:\/\//.test(url)) shell.openExternal(url)
   })
 
   if (devUrl) {

@@ -11,8 +11,10 @@ export function normalizeServerUrl(raw: string): string {
 
 export function getServerUrl(): string {
   try {
+    // An empty stored value means "use the default" (in Electron that is the gateway URL;
+    // in the browser dev server it is "" = same origin via the Vite proxy).
     const stored = localStorage.getItem(SERVER_URL_KEY)
-    if (stored !== null) return stored
+    if (stored) return stored
   } catch {
     // storage unavailable: fall back to the build-time default
   }

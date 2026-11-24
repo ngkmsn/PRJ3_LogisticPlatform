@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { getServerUrl, normalizeServerUrl, setServerUrl } from './config'
 
 describe('normalizeServerUrl', () => {
@@ -18,6 +18,13 @@ describe('normalizeServerUrl', () => {
 
 describe('server url storage', () => {
   afterEach(() => localStorage.clear())
+
+  it('falls back to the build-time default when the stored server is empty', () => {
+    vi.stubEnv('VITE_API_BASE_URL', 'http://localhost:8080')
+    setServerUrl('   ')
+    expect(getServerUrl()).toBe('http://localhost:8080')
+    vi.unstubAllEnvs()
+  })
 
   it('persists a normalized server url', () => {
     setServerUrl('192.168.1.20:8080/')
