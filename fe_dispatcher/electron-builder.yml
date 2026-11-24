@@ -1,0 +1,11 @@
+appId: com.logistics.dispatcher
+productName: Logistics Dispatcher
+directories:
+  output: release
+files:
+  - dist/**
+  - dist-electron/**
+  - package.json
+mac:
+  target: dir
+  category: public.app-category.business

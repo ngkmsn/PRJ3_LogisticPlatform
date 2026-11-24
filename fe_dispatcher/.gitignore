@@ -21,3 +21,4 @@ logs/
 /.opencode-skills/
 release/
 dist-electron/
+!.env.electron
