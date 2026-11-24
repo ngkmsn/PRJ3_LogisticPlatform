@@ -168,7 +168,7 @@ class OrderDetailsIntegrationTest {
     }
 
     @Test
-    @DisplayName("Non-customer roles (DRIVER, ADMIN) are rejected with 403 Forbidden")
+    @DisplayName("DRIVER is rejected with 403; ADMIN (operations staff) is allowed")
     void getOrderDetails_nonCustomer_forbidden() {
         String orderId = createOrderAndGetId(customerTokenA, "Chủ đơn A", new BigDecimal("50000.00"));
 
@@ -180,17 +180,16 @@ class OrderDetailsIntegrationTest {
                 .then()
                 .statusCode(403)
                 .body("success", equalTo(false))
-                .body("message", containsString("Only customers are permitted to view order details"));
+                .body("message", containsString("Only customers and operations staff are permitted to view order details"));
 
-        // Admin
+        // Admin (operations staff) is allowed
         given()
                 .header("Authorization", adminToken)
                 .when()
                 .get("/orders/" + orderId)
                 .then()
-                .statusCode(403)
-                .body("success", equalTo(false))
-                .body("message", containsString("Only customers are permitted to view order details"));
+                .statusCode(200)
+                .body("success", equalTo(true));
     }
 
     @Test

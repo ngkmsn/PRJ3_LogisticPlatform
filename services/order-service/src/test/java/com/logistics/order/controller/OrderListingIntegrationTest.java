@@ -199,7 +199,7 @@ class OrderListingIntegrationTest {
     }
 
     @Test
-    @DisplayName("Non-customer roles (DRIVER, ADMIN) are rejected with 403 Forbidden")
+    @DisplayName("DRIVER is rejected with 403; ADMIN (operations staff) is allowed")
     void listOrders_nonCustomer_forbidden() {
         // Driver
         given()
@@ -209,17 +209,16 @@ class OrderListingIntegrationTest {
                 .then()
                 .statusCode(403)
                 .body("success", equalTo(false))
-                .body("message", containsString("Only customers are permitted to view orders"));
+                .body("message", containsString("Only customers and operations staff are permitted to view orders"));
 
-        // Admin
+        // Admin (operations staff) is allowed
         given()
                 .header("Authorization", adminToken)
                 .when()
                 .get("/orders")
                 .then()
-                .statusCode(403)
-                .body("success", equalTo(false))
-                .body("message", containsString("Only customers are permitted to view orders"));
+                .statusCode(200)
+                .body("success", equalTo(true));
     }
 
     @Test

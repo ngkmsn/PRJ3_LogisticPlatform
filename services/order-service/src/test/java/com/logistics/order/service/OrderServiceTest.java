@@ -255,7 +255,7 @@ class OrderServiceTest {
     void listMyOrders_driverRole_forbidden() {
         assertThatThrownBy(() -> orderService.listMyOrders(driverToken, 0, 10, null))
                 .isInstanceOf(AccessDeniedException.class)
-                .hasMessageContaining("Only customers are permitted to view orders");
+                .hasMessageContaining("Only customers and operations staff are permitted to view orders");
     }
 
     @Test
@@ -330,7 +330,7 @@ class OrderServiceTest {
     void getOrderDetails_nonCustomer_forbidden() {
         assertThatThrownBy(() -> orderService.getOrderDetails(driverToken, "ord-1"))
                 .isInstanceOf(AccessDeniedException.class)
-                .hasMessageContaining("Only customers are permitted to view order details");
+                .hasMessageContaining("Only customers and operations staff are permitted to view order details");
     }
 
     @Test

@@ -121,6 +121,14 @@ public class OrderService {
         return principal;
     }
 
+    private AuthPrincipal resolveAuthenticatedStaffOrAdminOrDeny(String authHeader, String deniedMessage) {
+        try {
+            return resolveAuthenticatedStaffOrAdmin(authHeader, "view orders");
+        } catch (AccessDeniedException e) {
+            throw new AccessDeniedException(deniedMessage);
+        }
+    }
+
     public AuthPrincipal resolveAuthenticatedCustomer(String authHeader, String action) {
         if (authHeader == null || !authHeader.startsWith("Bearer ")) {
             log.warn("Authentication failed: missing or invalid Authorization header");
@@ -146,14 +154,32 @@ public class OrderService {
         return principal;
     }
 
+    private static boolean isOperationsStaff(AuthPrincipal principal) {
+        return principal.getRole() == Role.ADMIN || principal.getRole() == Role.DISPATCHER;
+    }
+
+    /**
+     * CUSTOMER: own orders only. ADMIN / DISPATCHER: all orders (operations view).
+     * Any other role is forbidden.
+     */
     public com.logistics.order.dto.PagedResponse<OrderDto> listMyOrders(String authHeader, int page, int size, String statusFilter) {
-        AuthPrincipal customer = resolveAuthenticatedCustomer(authHeader, "view orders");
+        AuthPrincipal caller;
+        try {
+            caller = resolveAuthenticatedCustomer(authHeader, "view orders");
+        } catch (AccessDeniedException notCustomer) {
+            caller = resolveAuthenticatedStaffOrAdminOrDeny(authHeader,
+                    "Access denied: Only customers and operations staff are permitted to view orders");
+        }
+        boolean staffView = isOperationsStaff(caller);
 
         int pageIndex = Math.max(0, page);
         int pageSize = (size <= 0 || size > 100) ? 10 : size;
 
-        StringBuilder query = new StringBuilder("customerId = :customerId");
-        io.quarkus.panache.common.Parameters params = io.quarkus.panache.common.Parameters.with("customerId", customer.getUserId());
+        StringBuilder query = new StringBuilder(staffView ? "1 = 1" : "customerId = :customerId");
+        io.quarkus.panache.common.Parameters params = staffView
+                ? new io.quarkus.panache.common.Parameters()
+                : io.quarkus.panache.common.Parameters.with("customerId", caller.getUserId());
+        AuthPrincipal customer = caller;
 
         if (statusFilter != null && !statusFilter.isBlank()) {
             try {
@@ -206,9 +232,9 @@ public class OrderService {
                 log.warn("PB-057/PB-058: Service '{}' lacks required scope 'order:read'", principal.getServiceId());
                 throw new AccessDeniedException("Insufficient service permissions: required scope order:read");
             }
-        } else if (principal.getRole() != Role.CUSTOMER) {
-            log.warn("Access denied: caller role '{}' is not CUSTOMER for view order details", principal.getRole());
-            throw new AccessDeniedException("Access denied: Only customers are permitted to view order details");
+        } else if (principal.getRole() != Role.CUSTOMER && !isOperationsStaff(principal)) {
+            log.warn("Access denied: caller role '{}' is not CUSTOMER or operations staff for view order details", principal.getRole());
+            throw new AccessDeniedException("Access denied: Only customers and operations staff are permitted to view order details");
         }
 
         if (orderIdentifier == null || orderIdentifier.isBlank()) {
